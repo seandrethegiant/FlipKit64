@@ -7,6 +7,8 @@ FlipKit64 is a pad instrument in the spirit of classic sampling drum machines: d
 
 FlipKit64 is free. If it's useful to you, you can support it on [Ko-fi](https://ko-fi.com/seandrethegiant).
 
+Source code and downloads: https://github.com/seandrethegiant/FlipKit64
+
 > **Beta:** it has been tested by its author in UA LUNA on Windows. Please report anything odd.
 
 ## Features
@@ -65,7 +67,7 @@ FlipKit64 is built with [JUCE](https://juce.com) 7 (tested with 7.0.12) and CMak
 
 ```
 git clone --branch 7.0.12 https://github.com/juce-framework/JUCE.git
-git clone <this repository> FlipKit64
+git clone https://github.com/seandrethegiant/FlipKit64.git
 cmake -S FlipKit64 -B build -DJUCE_DIR=JUCE -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
