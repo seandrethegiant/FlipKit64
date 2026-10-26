@@ -3,17 +3,29 @@
 
 namespace UI
 {
-    const juce::Colour bg      { 0xff17181c };
-    const juce::Colour panel   { 0xff202228 };
-    const juce::Colour line    { 0xff30333b };
-    const juce::Colour text    { 0xffe8e8ea };
-    const juce::Colour muted   { 0xff8b8f99 };
-    const juce::Colour left    { 0xffe0912f };   // left half of the TempoPAD (notes 36-67)
-    const juce::Colour right   { 0xff3fa7c9 };   // right half (notes 68-99)
-    const juce::Colour accent  { 0xfff0b44a };
-    const juce::Colour rec     { 0xffe0483e };
+    // Purple / orange / white theme
+    const juce::Colour bg      { 0xff150f22 };   // deep purple-black
+    const juce::Colour panel   { 0xff211836 };
+    const juce::Colour line    { 0xff3a2c58 };
+    const juce::Colour text    { 0xfff6f3fb };   // near white
+    const juce::Colour muted   { 0xff9d92b8 };
+    const juce::Colour left    { 0xffff7a1f };   // left half of the pad grid (notes 36-67): orange
+    const juce::Colour right   { 0xffa45cff };   // right half (notes 68-99): purple
+    const juce::Colour accent  { 0xffff8c2e };   // orange
+    const juce::Colour rec     { 0xffff3d5a };
 
-    inline juce::Colour padHue (int pad) { return (pad % PadLayout::cols) < 4 ? left : right; }
+    // Pad zones, matching the controller's default drum-mode colours (4x4 quadrants).
+    const juce::Colour zonePurple { 0xffc84dff };   // notes 52-67 (top left)
+    const juce::Colour zoneBlue   { 0xff7389fb };   // notes 84-99 (top right)
+    const juce::Colour zoneCyan   { 0xff1ad9fc };   // notes 36-51 (bottom left)
+    const juce::Colour zoneYellow { 0xfffee150 };   // notes 68-83 (bottom right)
+
+    inline juce::Colour padHue (int pad)
+    {
+        const bool leftHalf = (pad % PadLayout::cols) < 4;
+        const bool topHalf  = (pad / PadLayout::cols) < 4;
+        return leftHalf ? (topHalf ? zonePurple : zoneCyan) : (topHalf ? zoneBlue : zoneYellow);
+    }
 
     inline void styleButton (juce::TextButton& b)
     {

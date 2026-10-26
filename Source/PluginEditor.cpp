@@ -18,26 +18,29 @@ void PadButton::paint (Graphics& g)
     const Colour hue = padHue (index);
     auto r = getLocalBounds().toFloat().reduced (3.0f);
 
-    Colour fill = loaded ? hue.withMultipliedSaturation (0.55f).withMultipliedBrightness (0.45f)
-                         : panel.brighter (0.04f);
-    if (isMouseOver()) fill = fill.brighter (0.08f);
-    if (flashLevel > 0.0f) fill = fill.interpolatedWith (hue.brighter (0.4f), flashLevel);
+    // Loaded pads light up in their zone colour (like the controller's drum mode);
+    // empty pads keep a faint tint of it so the four zones stay visible.
+    Colour fill = loaded ? hue.withMultipliedBrightness (0.92f)
+                         : panel.interpolatedWith (hue, 0.10f);
+    if (isMouseOver()) fill = loaded ? fill.brighter (0.12f) : fill.interpolatedWith (hue, 0.12f);
+    if (flashLevel > 0.0f) fill = fill.interpolatedWith (Colours::white, flashLevel * 0.85f);
     g.setColour (fill);
     g.fillRoundedRectangle (r, 6.0f);
 
     if (selected || dragOver)
     {
-        g.setColour (dragOver ? Colours::white : accent);
-        g.drawRoundedRectangle (r, 6.0f, 2.0f);
+        g.setColour (Colours::white);
+        g.drawRoundedRectangle (r, 6.0f, 2.5f);
     }
     else
     {
-        g.setColour (loaded ? hue.withAlpha (0.6f) : line);
+        g.setColour (loaded ? hue.brighter (0.25f) : hue.withAlpha (0.25f));
         g.drawRoundedRectangle (r, 6.0f, 1.0f);
     }
 
+    const Colour ink = loaded ? Colour (0xff120c1c) : muted;   // dark text on lit pads
     auto inner = r.reduced (6.0f, 4.0f);
-    g.setColour (muted);
+    g.setColour (loaded ? ink.withAlpha (0.6f) : muted);
     g.setFont (Font (10.0f));
     g.drawText (String (note), inner.removeFromTop (12.0f), Justification::topLeft);
 
@@ -50,10 +53,10 @@ void PadButton::paint (Graphics& g)
         if (pad->choke > 0) badge << (badge.isEmpty() ? "" : " ") << "C" << pad->choke;
         if (badge.isNotEmpty())
         {
-            g.setColour (hue.brighter (0.3f));
+            g.setColour (ink.withAlpha (0.75f));
             g.drawText (badge, r.reduced (6.0f, 4.0f).removeFromTop (12.0f), Justification::topRight);
         }
-        g.setColour (text);
+        g.setColour (ink);
         g.setFont (Font (12.0f, Font::bold));
         g.drawFittedText (pad->name, inner.toNearestInt(), Justification::centred, 2, 0.8f);
     }
@@ -345,6 +348,19 @@ PadRomplerEditor::PadRomplerEditor (PadRomplerProcessor& p)
     getLookAndFeel().setColour (PopupMenu::backgroundColourId, panel.brighter (0.04f));
     getLookAndFeel().setColour (PopupMenu::textColourId, text);
     getLookAndFeel().setColour (PopupMenu::highlightedBackgroundColourId, accent.withAlpha (0.4f));
+    getLookAndFeel().setColour (ComboBox::arrowColourId, text);
+    getLookAndFeel().setColour (TextButton::buttonColourId, panel.brighter (0.08f));
+    getLookAndFeel().setColour (DirectoryContentsDisplayComponent::highlightColourId, right.withAlpha (0.35f));
+    getLookAndFeel().setColour (ToggleButton::textColourId, text);
+    getLookAndFeel().setColour (ToggleButton::tickColourId, accent);
+    getLookAndFeel().setColour (ToggleButton::tickDisabledColourId, muted);
+    getLookAndFeel().setColour (ScrollBar::thumbColourId, right.withAlpha (0.6f));
+    getLookAndFeel().setColour (Slider::backgroundColourId, line);
+    getLookAndFeel().setColour (Slider::trackColourId, right);
+    getLookAndFeel().setColour (Slider::thumbColourId, accent);
+    getLookAndFeel().setColour (TextEditor::backgroundColourId, panel.brighter (0.06f));
+    getLookAndFeel().setColour (TextEditor::outlineColourId, line);
+    getLookAndFeel().setColour (ListBox::backgroundColourId, panel);
 
     // ---- browser
     scanThread.startThread (Thread::Priority::low);
@@ -353,7 +369,7 @@ PadRomplerEditor::PadRomplerEditor (PadRomplerProcessor& p)
     fileTree.addListener (this);
     fileTree.setColour (TreeView::backgroundColourId, panel);
     fileTree.setColour (FileTreeComponent::textColourId, text);
-    fileTree.setColour (TreeView::selectedItemBackgroundColourId, accent.withAlpha (0.3f));
+    fileTree.setColour (TreeView::selectedItemBackgroundColourId, right.withAlpha (0.35f));
     addAndMakeVisible (fileTree);
     loadPlaces();
     placesBox.setTooltip ("Sample locations - your drum kits, music library, recordings. Add any folder.");
