@@ -703,6 +703,7 @@ void PadRomplerEditor::updateCtrlLabel()
 
 void PadRomplerEditor::timerCallback()
 {
+    sequencerPage.historyTick();
     // Follow the TempoPAD's mode buttons: User/Easy open the sequencer, Drum goes back.
     const int mode = proc.ctrlMode.load();
     if (mode != lastCtrlMode)
@@ -796,6 +797,13 @@ bool PadRomplerEditor::keyPressed (const KeyPress& key)
         return true;
     }
     if (key == KeyPress::escapeKey) { previewStrip.stop(); return true; }
+    const auto cmd = key.getModifiers().isCommandDown();
+    if (cmd && (key.getKeyCode() == 'Z' || key.getKeyCode() == 'z'))
+    {
+        if (key.getModifiers().isShiftDown()) sequencerPage.redo(); else sequencerPage.undo();
+        return true;
+    }
+    if (cmd && (key.getKeyCode() == 'Y' || key.getKeyCode() == 'y')) { sequencerPage.redo(); return true; }
     return false;
 }
 

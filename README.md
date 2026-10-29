@@ -1,7 +1,7 @@
 # FlipKit64
 
 **A free 64-pad drum sampler, slicer and step sequencer (VST3 + standalone, Windows).**
-By seandrethegiant · Version 0.9.4 beta
+By seandrethegiant · Version 0.9.5 beta
 
 FlipKit64 is a pad instrument in the spirit of classic sampling drum machines: drop your samples onto an 8×8 grid of pads, chop loops and records into slices, shape each pad, and sequence it all in sync with your DAW. It works with any MIDI pad controller or keyboard, and the grid follows the common 64-pad "drum rack" note layout (notes 36–99) used by 8×8 pad controllers such as the Synido TempoPAD.
 
@@ -26,8 +26,12 @@ Source code and downloads: https://github.com/seandrethegiant/FlipKit64
 - Resample FlipKit64's own output (or an audio input, if your DAW provides one); recordings are saved as WAV to `Documents\FlipKit64\Recordings`
 
 **Sequencer**
-- 8 patterns, up to 64 steps, 1/8 to 1/32 and triplets
-- Per-step velocity and ratchets (2–4 hits per step, for rolls)
+- 8 patterns, up to 64 steps, 1/4 to 1/32 and triplets
+- Per step: velocity, ratchets (2–4 hits per step), **chance** (plays only some of the time), **conditions** (1st of every 2 or 4 loops, only in fills, not in fills) and **timing** (nudge up to half a step early or late). Click a step to select it and set these in the panel on the right, or right-click it.
+- **Fill** button: fill-only steps play and not-in-fill steps rest while it's on
+- **Capture**: press it after jamming on the pads while the pattern loops, and the last loop of what you played becomes part of the pattern, even with Rec off
+- **Roll** (note repeat): hold a pad and it repeats at 1/8, 1/16 or 1/32, in time with the pattern
+- **Undo / Redo** for every sequencer change (Ctrl+Z, Ctrl+Shift+Z)
 - Swing, live recording from your pads (quantized), pattern switching at the bar line
 - Follows your DAW's transport, or runs on its own
 

@@ -65,27 +65,76 @@ using PadPtr = std::shared_ptr<const PadState>;
 namespace Seq
 {
     constexpr int numPatterns = 8, maxSteps = 64;
+
+    // When a step plays, counted in loops of its pattern since the transport's start (Elektron-style trig conditions).
+    enum Cond : uint8_t { always = 0, of2a, of2b, of4a, of4b, of4c, of4d, fillOnly, notFill, numConds };
+    inline bool condPasses (int c, long long loop, bool fill)
+    {
+        switch (c)
+        {
+            case of2a: return loop % 2 == 0;   case of2b: return loop % 2 == 1;
+            case of4a: return loop % 4 == 0;   case of4b: return loop % 4 == 1;
+            case of4c: return loop % 4 == 2;   case of4d: return loop % 4 == 3;
+            case fillOnly: return fill;        case notFill: return ! fill;
+            default: return true;
+        }
+    }
+    inline const char* condName (int c)
+    {
+        static const char* names[] = { "Every loop", "1st of 2", "2nd of 2", "1st of 4", "2nd of 4", "3rd of 4", "4th of 4", "Only in fills", "Not in fills" };
+        return names[juce::jlimit (0, (int) numConds - 1, c)];
+    }
+    inline const char* condShort (int c)
+    {
+        static const char* names[] = { "", "1:2", "2:2", "1:4", "2:4", "3:4", "4:4", "F", "!F" };
+        return names[juce::jlimit (0, (int) numConds - 1, c)];
+    }
 }
 
 struct PatternData
 {
     std::atomic<int> length { 16 };          // steps (16/32/48/64)
-    std::atomic<int> stepsPerBeat { 4 };     // 2 = 1/8, 3 = 1/8T, 4 = 1/16, 6 = 1/16T, 8 = 1/32
+    std::atomic<int> stepsPer2Beats { 8 };   // steps in two beats: 2 = 1/4, 3 = 1/4T, 4 = 1/8, 6 = 1/8T, 8 = 1/16, 12 = 1/16T, 16 = 1/32
+    double stepLength() const { return 2.0 / juce::jmax (1, stepsPer2Beats.load()); }   // in beats
     std::atomic<uint8_t> vel[PadLayout::numPads][Seq::maxSteps];      // 0 = off
     std::atomic<uint8_t> ratchet[PadLayout::numPads][Seq::maxSteps];  // 1..4 hits per step
+    std::atomic<uint8_t> chance[PadLayout::numPads][Seq::maxSteps];   // 1..100 percent
+    std::atomic<uint8_t> cond[PadLayout::numPads][Seq::maxSteps];     // Seq::Cond
+    std::atomic<uint8_t> nudge[PadLayout::numPads][Seq::maxSteps];    // 128 = on the grid; 78..178 = -50..+50 % of a step
 
     PatternData() { clear(); }
     void clear()
     {
-        for (auto& row : vel) for (auto& v : row) v.store (0);
-        for (auto& row : ratchet) for (auto& r : row) r.store (1);
+        for (int p = 0; p < PadLayout::numPads; ++p)
+            for (int s = 0; s < Seq::maxSteps; ++s) { vel[p][s].store (0); resetStep (p, s); }
+    }
+    void resetStep (int p, int s)               // everything but velocity back to plain
+    {
+        ratchet[p][s].store (1); chance[p][s].store (100); cond[p][s].store (0); nudge[p][s].store (128);
+    }
+    void setStep (int p, int s, uint8_t v) { vel[p][s].store (v); resetStep (p, s); }
+    void copyStep (int p, int s, const PatternData& o, int op, int os)
+    {
+        vel[p][s].store (o.vel[op][os].load()); ratchet[p][s].store (o.ratchet[op][os].load());
+        chance[p][s].store (o.chance[op][os].load()); cond[p][s].store (o.cond[op][os].load());
+        nudge[p][s].store (o.nudge[op][os].load());
     }
     void copyFrom (const PatternData& o)
     {
-        length.store (o.length.load()); stepsPerBeat.store (o.stepsPerBeat.load());
+        length.store (o.length.load()); stepsPer2Beats.store (o.stepsPer2Beats.load());
+        for (int p = 0; p < PadLayout::numPads; ++p)
+            for (int s = 0; s < Seq::maxSteps; ++s) copyStep (p, s, o, p, s);
+    }
+    bool sameAs (const PatternData& o) const
+    {
+        if (length.load() != o.length.load() || stepsPer2Beats.load() != o.stepsPer2Beats.load()) return false;
         for (int p = 0; p < PadLayout::numPads; ++p)
             for (int s = 0; s < Seq::maxSteps; ++s)
-            { vel[p][s].store (o.vel[p][s].load()); ratchet[p][s].store (o.ratchet[p][s].load()); }
+                if (vel[p][s].load() != o.vel[p][s].load() || (vel[p][s].load() > 0
+                     && (ratchet[p][s].load() != o.ratchet[p][s].load() || chance[p][s].load() != o.chance[p][s].load()
+                         || cond[p][s].load() != o.cond[p][s].load() || nudge[p][s].load() != o.nudge[p][s].load())))
+                    return false;
+        return true;
     }
     bool padHasSteps (int pad) const
     {
@@ -157,6 +206,10 @@ public:
     std::atomic<int> queuedPattern { -1 };       // switches at the next pattern start while playing
     std::atomic<float> swing { 50.0f };          // 50 (straight) .. 75 percent
     std::atomic<bool> seqRecord { false };       // live-record incoming pad hits into the pattern
+    std::atomic<bool> fillOn { false };          // "Fill" held/latched: fill-only steps play, not-in-fill steps rest
+    std::atomic<int> rollDiv { 0 };              // Roll: 0 = off, else repeats per beat (2 = 1/8, 4 = 1/16, 8 = 1/32)
+    int captureToPattern();                      // message thread: last loop of pad playing -> current pattern; -1 if stopped
+    std::atomic<uint32_t> kitLoads { 0 };        // bumped when a kit or project replaces the patterns (editor resets undo)
     std::atomic<bool> internalPlaying { false }; // own transport when LUNA isn't playing
     std::atomic<double> internalBpm { 120.0 };
     std::atomic<int> playStep { -1 };            // for the editor's playhead (-1 = stopped)
@@ -220,8 +273,29 @@ private:
     void renderVoices (juce::AudioBuffer<float>& buffer, int start, int count);
     void scheduleSequencer (double ppq0, double ppqPerSample, int numSamples, Hit* hits, int& numHits, int maxHits);
 
+    // 0..99, fixed for a given step occurrence (so a ratchet's repeats agree), different every loop.
+    uint64_t rollSeed = (uint64_t) juce::Random::getSystemRandom().nextInt64();
+    int stepRoll (long long k, int pad) const
+    {
+        uint64_t h = (uint64_t) k * 0x9E3779B97F4A7C15ull ^ ((uint64_t) pad + 1) * 0xC2B2AE3D27D4EB4Full ^ rollSeed;
+        h ^= h >> 31; h *= 0xBF58476D1CE4E5B9ull; h ^= h >> 29;
+        return (int) (h % 100);
+    }
+
     std::shared_ptr<const PadState> pads[PadLayout::numPads];
     int noteToPad[128];
+
+    // Roll (audio thread only): pads currently held down
+    struct Held { bool on = false; float vel = 0.0f; double pressPpq = -1.0; double nextSample = 0.0; };
+    Held held[PadLayout::numPads];
+    juce::int64 sampleClock = 0;
+
+    // Capture: the most recent pad hits played while the sequencer runs (audio thread writes, editor reads)
+    struct CapHit { std::atomic<double> ppq { 0.0 }; std::atomic<int> pad { 0 }; std::atomic<float> vel { 0.0f }; };
+    static constexpr int capSize = 1024;
+    CapHit capLog[capSize];
+    std::atomic<uint32_t> capCount { 0 };
+    std::atomic<double> lastPpqEnd { -1.0 };     // transport position at the end of the last block, -1 = stopped
 
     // voices
     struct Voice

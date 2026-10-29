@@ -331,11 +331,17 @@ $('sendraw').onclick = () => {
 
 function refresh(){
   const names = [];
-  for (const i of access.inputs.values()) { i.onmidimessage = onMsg; names.push(i.name); }
+  const through = n => /midi through/i.test(n || '');
+  for (const i of access.inputs.values()) {
+    if (through(i.name)) { i.onmidimessage = null; continue; }   // loopback port: only echoes what we send
+    i.onmidimessage = onMsg; names.push(i.name);
+  }
   $('ins').textContent = names.length ? 'Listening to: ' + names.join(', ') : 'No controller found - plug it in';
   const sel = $('out'), keep = sel.value; sel.innerHTML = '';
-  for (const o of access.outputs.values()){ const op = document.createElement('option'); op.value = o.id; op.textContent = o.name; sel.appendChild(op); }
-  if (keep && access.outputs.get(keep)) sel.value = keep;
+  const outs = [...access.outputs.values()].filter(o => !through(o.name));
+  for (const o of outs){ const op = document.createElement('option'); op.value = o.id; op.textContent = o.name; sel.appendChild(op); }
+  if (keep && access.outputs.get(keep) && !through(access.outputs.get(keep).name)) sel.value = keep;
+  else { const tp = outs.find(o => /tempopad|synido/i.test(o.name)); if (tp) sel.value = tp.id; }
 }
 async function start(){
   try {

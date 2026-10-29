@@ -185,6 +185,171 @@ int main (int, char** argv)
         q.setPlayHead (nullptr);
     }
 
+    {   // ---------------- chance, conditions, fills, micro-timing
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        q.assignRegion (A, makeTone (0.01, 1000.0f), 0, 1, "a");
+        q.assignRegion (B, makeTone (0.01, 900.0f), 0, 1, "b");
+        q.assignRegion (C, makeTone (0.01, 800.0f), 0, 1, "c");
+        FakePlayHead ph; q.setPlayHead (&ph);
+        auto& pat = q.patterns[0];
+        pat.length = 1; pat.stepsPer2Beats = 16;                      // one 1/32 step, looping
+        pat.setStep (A, 0, 100); pat.chance[A][0] = 50;
+        const uint32_t h0 = hits (q, 36);
+        while (ph.ppq < 25.0) run (q, 1, -1, 1, &ph);                // 200 loops
+        const int played = (int) (hits (q, 36) - h0);
+        check (played > 70 && played < 130, ("chance 50%: plays about half the time (" + String (played) + " of 200)").toRawUTF8());
+
+        ph.playing = false; run (q, 2, -1, 1, &ph);
+        pat.clear(); pat.length = 4; pat.stepsPer2Beats = 8;          // 4 x 1/16 = 1 beat per loop
+        pat.setStep (A, 0, 100); pat.cond[A][0] = Seq::of4b;           // 2nd of every 4 loops
+        pat.setStep (B, 0, 100); pat.cond[B][0] = Seq::fillOnly;
+        pat.setStep (C, 0, 100); pat.cond[C][0] = Seq::notFill;
+        ph.ppq = 0.0; ph.playing = true;
+        const uint32_t a0 = hits (q, 36), b0 = hits (q, 37), c0 = hits (q, 38);
+        while (ph.ppq < 0.99) run (q, 1, -1, 1, &ph);
+        const bool notLoop1 = hits (q, 36) == a0;
+        while (ph.ppq < 1.99) run (q, 1, -1, 1, &ph);
+        const bool loop2 = hits (q, 36) == a0 + 1;
+        while (ph.ppq < 7.99) run (q, 1, -1, 1, &ph);
+        check (notLoop1 && loop2 && hits (q, 36) == a0 + 2, "condition 2nd-of-4: plays on loops 2 and 6 only");
+        check (hits (q, 37) == b0 && hits (q, 38) == c0 + 8, "fill off: fill steps rest, not-fill steps play");
+        q.fillOn = true;
+        const uint32_t b1 = hits (q, 37), c1 = hits (q, 38);
+        while (ph.ppq < 9.99) run (q, 1, -1, 1, &ph);
+        check (hits (q, 37) == b1 + 2 && hits (q, 38) == c1, "fill on: fill steps play, not-fill steps rest");
+        q.fillOn = false;
+
+        ph.playing = false; run (q, 2, -1, 1, &ph);
+        pat.clear(); pat.length = 16;
+        pat.setStep (A, 1, 100); pat.nudge[A][1] = 128 + 50;           // step 2 (ppq 0.25), half a step late -> 0.375
+        pat.setStep (B, 3, 100); pat.nudge[B][3] = 128 - 50;           // step 4 (ppq 0.75), half a step early -> 0.625
+        ph.ppq = 0.0; ph.playing = true;
+        const uint32_t n0 = hits (q, 36), m0 = hits (q, 37);
+        while (ph.ppq < 0.36) run (q, 1, -1, 1, &ph);
+        const bool lateNotYet = hits (q, 36) == n0;
+        while (ph.ppq < 0.39) run (q, 1, -1, 1, &ph);
+        check (lateNotYet && hits (q, 36) == n0 + 1, "timing: a late step lands half a step later");
+        while (ph.ppq < 0.61) run (q, 1, -1, 1, &ph);
+        const bool earlyNotYet = hits (q, 37) == m0;
+        while (ph.ppq < 0.64) run (q, 1, -1, 1, &ph);
+        check (earlyNotYet && hits (q, 37) == m0 + 1, "timing: an early step lands half a step sooner");
+
+        MemoryBlock mb; pat.chance[A][1] = 33; pat.cond[A][1] = Seq::fillOnly;
+        q.getStateInformation (mb);
+        PadRomplerProcessor r; r.setStateInformation (mb.getData(), (int) mb.getSize());
+        check (r.patterns[0].chance[A][1].load() == 33 && r.patterns[0].cond[A][1].load() == Seq::fillOnly
+               && r.patterns[0].nudge[A][1].load() == 178 && r.patterns[0].nudge[B][3].load() == 78, "state keeps chance, conditions and timing");
+        q.setPlayHead (nullptr);
+    }
+
+    {   // ---------------- Capture
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        q.assignRegion (A, makeTone (0.01, 1000.0f), 0, 1, "a");
+        q.assignRegion (B, makeTone (0.01, 900.0f), 0, 1, "b");
+        check (q.captureToPattern() == -1, "Capture: says so when the pattern isn't playing");
+        FakePlayHead ph; q.setPlayHead (&ph);
+        while (ph.ppq < 0.25) run (q, 1, -1, 1, &ph);
+        run (q, 1, 36, 0.9f, &ph);                                     // just after step 2
+        while (ph.ppq < 0.49) run (q, 1, -1, 1, &ph);
+        run (q, 1, 37, 0.6f, &ph);                                     // just before step 3
+        while (ph.ppq < 4.1) run (q, 1, -1, 1, &ph);
+        const int n = q.captureToPattern();
+        auto& pat = q.patterns[0];
+        int on = 0; for (int p = 0; p < 64; ++p) for (int st = 0; st < 64; ++st) on += pat.vel[p][st].load() > 0 ? 1 : 0;
+        check (n == 2 && pat.vel[A][1].load() > 100 && pat.vel[B][2].load() > 60 && pat.vel[B][2].load() < 90 && on == 2,
+               "Capture: the last loop of playing lands on the right steps with its velocity");
+        q.setPlayHead (nullptr);
+    }
+
+    {   // ---------------- Roll
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        q.assignRegion (A, makeTone (0.01, 1000.0f), 0, 1, "a");
+        q.internalBpm = 120.0; q.rollDiv = 4;                          // 1/16 at 120 BPM = 125 ms
+        const uint32_t h0 = hits (q, 36);
+        run (q, 1, 36, 1.0f);
+        run (q, (int) (0.51 * SR / BS));
+        const uint32_t held = hits (q, 36) - h0;
+        AudioBuffer<float> b (2, BS); MidiBuffer m; m.addEvent (MidiMessage::noteOff (1, 36), 0); q.processBlock (b, m);
+        const uint32_t h1 = hits (q, 36);
+        run (q, (int) (0.5 * SR / BS));
+        check (held == 5 && hits (q, 36) == h1, ("Roll while stopped: holding for half a second repeats every 1/16, letting go stops (" + String ((int) held) + ")").toRawUTF8());
+
+        FakePlayHead ph; q.setPlayHead (&ph);
+        const uint32_t h2 = hits (q, 36);
+        run (q, 1, 36, 1.0f, &ph);
+        while (ph.ppq < 0.99) run (q, 1, -1, 1, &ph);
+        check (hits (q, 36) - h2 == 4, "Roll while playing: repeats land on the 1/16 grid");
+        MidiBuffer m2; m2.addEvent (MidiMessage::noteOff (1, 36), 0); q.processBlock (b, m2);
+        q.rollDiv = 0;
+        q.setPlayHead (nullptr);
+    }
+
+    {   // ---------------- undo / redo
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        PatternHistory hist (q);
+        auto settle = [&] { for (int i = 0; i < 6; ++i) hist.tick(); Thread::sleep (450); for (int i = 0; i < 6; ++i) hist.tick(); };
+        check (! hist.canUndo(), "undo: nothing to undo at first");
+        q.patterns[0].setStep (A, 0, 100);
+        settle();
+        q.patterns[0].setStep (A, 4, 100); q.patterns[0].chance[A][4] = 50;
+        settle();
+        check (hist.canUndo(), "undo: edits are recorded");
+        hist.undo();
+        check (q.patterns[0].vel[A][4].load() == 0 && q.patterns[0].vel[A][0].load() == 100, "undo: takes back the last change only");
+        hist.redo();
+        check (q.patterns[0].vel[A][4].load() == 100 && q.patterns[0].chance[A][4].load() == 50, "redo: puts it back, settings included");
+        q.patterns[0].setStep (A, 8, 90);                               // not settled yet
+        hist.tick(); hist.tick(); hist.tick();
+        hist.undo();
+        check (q.patterns[0].vel[A][8].load() == 0 && q.patterns[0].vel[A][4].load() == 100, "undo: also takes back a change made a moment ago");
+        q.patterns[2].setStep (B, 1, 100);
+        settle();
+        hist.undo();
+        check (q.patterns[2].vel[B][1].load() == 0 && q.currentPattern.load() == 2, "undo: a change in another pattern switches to it");
+        MemoryBlock mb; q.getStateInformation (mb); q.setStateInformation (mb.getData(), (int) mb.getSize());
+        hist.tick();
+        check (! hist.canUndo() && ! hist.canRedo(), "undo: loading a kit or project starts fresh");
+    }
+
+    {   // ---------------- 1/4 and 1/4-triplet steps
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        q.assignRegion (A, makeTone (0.02, 1000.0f), 0, 1, "click");
+        FakePlayHead ph; q.setPlayHead (&ph);
+        auto& pat = q.patterns[0];
+        pat.stepsPer2Beats = 2;                                       // 1/4
+        pat.vel[A][1] = 100;
+        const uint32_t h0 = hits (q, 36);
+        while (ph.ppq < 0.98) run (q, 1, -1, 1, &ph);
+        const bool early = hits (q, 36) == h0;
+        while (ph.ppq < 1.02) run (q, 1, -1, 1, &ph);
+        check (early && hits (q, 36) == h0 + 1, "1/4 steps: step 2 lands on beat 2");
+
+        ph.playing = false; run (q, 2, -1, 1, &ph);
+        pat.clear(); pat.stepsPer2Beats = 3;                          // 1/4 triplet
+        pat.vel[A][1] = 100;
+        ph.ppq = 0.0; ph.playing = true;
+        const uint32_t h1 = hits (q, 36);
+        while (ph.ppq < 0.65) run (q, 1, -1, 1, &ph);
+        const bool early3 = hits (q, 36) == h1;
+        while (ph.ppq < 0.69) run (q, 1, -1, 1, &ph);
+        check (early3 && hits (q, 36) == h1 + 1, "1/4 triplets: step 2 lands at 2/3 of a beat");
+        q.setPlayHead (nullptr);
+
+        MemoryBlock mb; q.getStateInformation (mb);
+        PadRomplerProcessor r; r.setStateInformation (mb.getData(), (int) mb.getSize());
+        check (r.patterns[0].stepsPer2Beats.load() == 3, "state keeps 1/4-triplet steps");
+
+        auto xml = AudioProcessor::getXmlFromBinary (mb.getData(), (int) mb.getSize());
+        bool edited = false;
+        if (xml != nullptr)
+            for (auto* e = xml->getFirstChildElement(); e != nullptr; e = e->getNextElement())
+                for (auto* pe : e->getChildWithTagNameIterator ("Pattern"))
+                    if (pe->getIntAttribute ("index", -1) == 0) { pe->removeAttribute ("stepsPer2Beats"); pe->setAttribute ("stepsPerBeat", 2); edited = true; }
+        MemoryBlock old; if (xml != nullptr) AudioProcessor::copyXmlToBinary (*xml, old);
+        PadRomplerProcessor o; o.setStateInformation (old.getData(), (int) old.getSize());
+        check (edited && o.patterns[0].stepsPer2Beats.load() == 4, "older projects: 1/8 steps load as 1/8");
+    }
+
     {   // ---------------- TempoPAD controller modes (MMC transport, User = steps, Easy = patterns)
         PadRomplerProcessor q; q.prepareToPlay (SR, BS);
         q.assignRegion (A, makeTone (0.05, 1000.0f), 0, 1, "click");
@@ -262,6 +427,25 @@ int main (int, char** argv)
         if (auto* snap = std::getenv ("FLIPKIT_SNAP"))
         {
             ed->setSize (1280, 780);
+            auto& sp = q.patterns[0];
+            const int k = padOfNote (36), s2 = padOfNote (37), hh = padOfNote (38);
+            q.assignRegion (k, makeTone (0.05, 60.0f), 0, 1, "Kick");
+            q.assignRegion (s2, makeTone (0.05, 200.0f), 0, 1, "Snare");
+            q.assignRegion (hh, makeTone (0.05, 4000.0f), 0, 1, "Closed hat");
+            for (int st : { 0, 7, 10 }) sp.setStep (k, st, 118);
+            sp.nudge[k][7] = 138;
+            sp.setStep (k, 15, 90); sp.cond[k][15] = Seq::of4a;
+            for (int st : { 4, 12 }) sp.setStep (s2, st, 120);
+            sp.setStep (s2, 14, 70); sp.chance[s2][14] = 50;
+            for (int st = 0; st < 16; st += 2) sp.setStep (hh, st, st % 4 == 0 ? 100 : 72);
+            sp.ratchet[hh][14] = 3;
+            for (auto* c : ed->getChildren())
+                if (auto* seqPage = dynamic_cast<SequencerPage*> (c))
+                {
+                    seqPage->getGrid().selPad = s2; seqPage->getGrid().selStep = 14;
+                    seqPage->padsChanged(); seqPage->stepChanged();
+                }
+            MessageManager::getInstance()->runDispatchLoopUntil (200);
             auto img = ed->createComponentSnapshot (ed->getLocalBounds());
             const File snapFile { String (snap) }; FileOutputStream fo { snapFile }; fo.setPosition (0); fo.truncate();
             PNGImageFormat().writeImageToStream (img, fo);
