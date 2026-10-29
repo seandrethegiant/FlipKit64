@@ -1,7 +1,7 @@
 # FlipKit64
 
 **A free 64-pad drum sampler, slicer and step sequencer (VST3 + standalone, Windows).**
-By seandrethegiant · Version 0.9.2 beta
+By seandrethegiant · Version 0.9.3 beta
 
 FlipKit64 is a pad instrument in the spirit of classic sampling drum machines: drop your samples onto an 8×8 grid of pads, chop loops and records into slices, shape each pad, and sequence it all in sync with your DAW. It works with any MIDI pad controller or keyboard, and the grid follows the common 64-pad "drum rack" note layout (notes 36–99) used by 8×8 pad controllers such as the Synido TempoPAD.
 
@@ -33,6 +33,7 @@ Source code and downloads: https://github.com/seandrethegiant/FlipKit64
 
 **Browser**
 - Saved locations for your sample folders and music library ("Add a folder...")
+- Preview player: click a sample to hear it (click again to replay), or use the player under the browser for long tracks: waveform you can click to jump around, play/pause, stop, loop, and "Chop it" to send it to the Sampler. Space plays/pauses, Esc stops.
 - Network locations: browse a PC's shared folders directly ("Add a network location...", on Linux and Chromebook). Samples download once into a local cache, so they play instantly and kits keep working; if the cache is cleared, kits fetch their samples again. On Windows, add a share with "Add a folder..." and a path like `\\PC-NAME\Music`.
 - Formats: WAV, AIFF, FLAC, OGG, MP3
 

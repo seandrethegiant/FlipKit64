@@ -33,6 +33,10 @@ private:
     void selectedRowsChanged (int lastRowSelected) override;
     void listBoxItemDoubleClicked (int row, const juce::MouseEvent&) override;
     void returnKeyPressed (int lastRowSelected) override;
+    void listBoxItemClicked (int row, const juce::MouseEvent&) override;
+    void previewRow (int row);
+    int lastPreviewRow = -1;
+    juce::uint32 lastPreviewMs = 0;
     juce::var getDragSourceDescription (const juce::SparseSet<int>& rows) override;
     juce::String getTooltipForRow (int row) override;
 

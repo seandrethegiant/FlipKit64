@@ -378,6 +378,7 @@ PadRomplerEditor::PadRomplerEditor (PadRomplerProcessor& p)
     fileTree.setColour (TreeView::selectedItemBackgroundColourId, right.withAlpha (0.35f));
     addAndMakeVisible (fileTree);
     addChildComponent (netBrowser);
+    addAndMakeVisible (previewStrip);
     netBrowser.previewEnabled = [this] { return previewToggle.getToggleState(); };
     netBrowser.onPreview = [this] (const File& f) { proc.previewFile (f); };
     netBrowser.onOpen = [this] (const File& f) { fileDoubleClicked (f); };
@@ -639,11 +640,26 @@ void PadRomplerEditor::selectPad (int index)
     samplerPage.selectedPadChanged();
 }
 
+void PadRomplerEditor::previewNow (const File& f)
+{
+    lastPreviewed = f;
+    lastPreviewMs = Time::getMillisecondCounter();
+    proc.previewFile (f);
+}
+
 void PadRomplerEditor::selectionChanged()
 {
     if (! previewToggle.getToggleState()) return;
     auto f = fileTree.getSelectedFile (0);
-    if (f.existsAsFile()) proc.previewFile (f);
+    if (f.existsAsFile() && fileTree.getNumSelectedFiles() == 1) previewNow (f);
+}
+
+void PadRomplerEditor::fileClicked (const File& f, const MouseEvent& e)
+{
+    // Clicking the selected sample again plays it again (quick drum-hit auditioning).
+    if (! previewToggle.getToggleState() || ! f.existsAsFile() || e.mods.isAnyModifierKeyDown()) return;
+    if (f == lastPreviewed && Time::getMillisecondCounter() - lastPreviewMs < 250) return;   // just played by the selection change
+    previewNow (f);
 }
 
 void PadRomplerEditor::fileDoubleClicked (const File& f)
@@ -655,6 +671,7 @@ void PadRomplerEditor::fileDoubleClicked (const File& f)
 
 void PadRomplerEditor::timerCallback()
 {
+    previewStrip.tick();
     if (padsPage.isVisible()) padsPage.tick();
     samplerPage.tick();
     if (sequencerPage.isVisible()) sequencerPage.tick();
@@ -711,8 +728,27 @@ void PadRomplerEditor::resized()
     br.removeFromTop (4);
     browserPath.setBounds (br.removeFromTop (18));
     br.removeFromTop (4);
+    previewStrip.setBounds (br.removeFromBottom (PreviewStrip::preferredHeight));
+    br.removeFromBottom (4);
     fileTree.setBounds (br);
     netBrowser.setBounds (br);
+}
+
+bool PadRomplerEditor::keyPressed (const KeyPress& key)
+{
+    if (key == KeyPress::spaceKey)
+    {
+        // Space plays / pauses; if the selected file isn't the one in the player, load it first.
+        const auto sel = netActive ? Array<File>() : browserSelection();
+        auto current = proc.playerSampleRef();
+        if (sel.size() == 1 && (current == nullptr || current->file != sel[0]))
+            proc.previewFile (sel[0]);
+        else
+            previewStrip.togglePlay();
+        return true;
+    }
+    if (key == KeyPress::escapeKey) { previewStrip.stop(); return true; }
+    return false;
 }
 
 void PadRomplerEditor::showNetPlace (const String& key)

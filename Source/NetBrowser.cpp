@@ -154,9 +154,24 @@ String NetBrowser::getTooltipForRow (int row)
 
 void NetBrowser::selectedRowsChanged (int lastRowSelected)
 {
+    if (list.getNumSelectedRows() == 1) previewRow (lastRowSelected);
+}
+
+void NetBrowser::listBoxItemClicked (int row, const MouseEvent& e)
+{
+    // Clicking the selected sample again plays it again (quick drum-hit auditioning).
+    if (e.mods.isAnyModifierKeyDown()) return;
+    if (row == lastPreviewRow && Time::getMillisecondCounter() - lastPreviewMs < 250) return;
+    previewRow (row);
+}
+
+void NetBrowser::previewRow (int lastRowSelected)
+{
     auto* e = entryForRow (lastRowSelected);
-    if (e == nullptr || e->isDir || list.getNumSelectedRows() != 1) return;
+    if (e == nullptr || e->isDir) return;
     if (previewEnabled && ! previewEnabled()) return;
+    lastPreviewRow = lastRowSelected;
+    lastPreviewMs = Time::getMillisecondCounter();
 
     ++downloading; repaint();
     const auto target = remotePathFor (*e);

@@ -3,6 +3,7 @@
 #include "SamplerPage.h"
 #include "SequencerPage.h"
 #include "NetBrowser.h"
+#include "PreviewStrip.h"
 
 class PadsPage;
 
@@ -104,11 +105,15 @@ public:
     void openInSampler (const juce::File& file) override;
 
     void showTab (int tab);
+    bool keyPressed (const juce::KeyPress&) override;
 
 private:
     void timerCallback() override;
     void selectionChanged() override;
-    void fileClicked (const juce::File&, const juce::MouseEvent&) override {}
+    void fileClicked (const juce::File&, const juce::MouseEvent&) override;
+    juce::File lastPreviewed;
+    juce::uint32 lastPreviewMs = 0;
+    void previewNow (const juce::File&);
     void fileDoubleClicked (const juce::File&) override;
     void browserRootChanged (const juce::File&) override {}
     void setBrowserRoot (const juce::File&);
@@ -132,6 +137,7 @@ private:
     };
     std::vector<Place> places;                                 // browser locations (saved in settings)
     NetBrowser netBrowser;
+    PreviewStrip previewStrip { *this };
     Net::SharedLibrary netLib;
     bool netActive = false;
     juce::String currentNetKey;

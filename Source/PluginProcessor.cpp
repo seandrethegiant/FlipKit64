@@ -190,7 +190,51 @@ void PadRomplerProcessor::previewRegion (const SamplePtr& s, float start, float 
 
 void PadRomplerProcessor::previewFile (const File& file)
 {
-    previewRegion (loadSample (file), 0.0f, 1.0f);
+    playerLoad (loadSample (file), true);
+}
+
+void PadRomplerProcessor::playerLoad (const SamplePtr& s, bool autoPlay)
+{
+    if (s == nullptr) return;
+    if (playerHold != nullptr && playerHold != s) playerRetired.push_back (playerHold);
+    playerHold = s;
+    playerStopReq = false;
+    playerPosOut = 0.0;
+    playerSeekReq = 0.0;
+    std::atomic_store (&playerSample, s);
+    playerPlaying = autoPlay;
+}
+
+void PadRomplerProcessor::playerPlay()
+{
+    if (playerHold == nullptr) return;
+    playerStopReq = false;
+    playerPlaying = true;
+}
+
+void PadRomplerProcessor::playerPause() { playerPlaying = false; }
+
+void PadRomplerProcessor::playerStop()
+{
+    playerPlaying = false;
+    playerStopReq = true;                          // the audio thread rewinds once faded out
+    playerPosOut = 0.0;
+}
+
+void PadRomplerProcessor::playerSeek (double fraction)
+{
+    if (playerHold == nullptr) return;
+    const double frames = jlimit (0.0, 1.0, fraction) * (double) jmax (0, playerHold->audio.getNumSamples() - 1);
+    playerStopReq = false;
+    playerSeekReq = frames;
+    playerPosOut = frames;
+}
+
+double PadRomplerProcessor::playerPositionFraction() const
+{
+    if (playerHold == nullptr) return 0.0;
+    const int len = playerHold->audio.getNumSamples();
+    return len > 1 ? jlimit (0.0, 1.0, playerPosOut.load() / (double) (len - 1)) : 0.0;
 }
 
 void PadRomplerProcessor::startTap (const SamplePtr& s, double startSample)
@@ -233,6 +277,10 @@ void PadRomplerProcessor::timerCallback()
                                            [&] (const std::shared_ptr<const Preview>& p)
                                            { return p != current && p.use_count() == 1; }),
                            retiredPreviews.end());
+
+    playerRetired.erase (std::remove_if (playerRetired.begin(), playerRetired.end(),
+                                         [] (const SamplePtr& p) { return p.use_count() == 1; }),
+                         playerRetired.end());
 
     // drop cached samples not used by any pad, voice or preview
     sampleCache.erase (std::remove_if (sampleCache.begin(), sampleCache.end(),
@@ -629,6 +677,44 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
             tapPlayPos += tapStep;
         }
         tapPos = tapPlayPos;
+    }
+
+    // browser player (with short fades so pause / stop never click)
+    {
+        auto ps = std::atomic_load (&playerSample);
+        const double seek = playerSeekReq.exchange (-1.0);
+        if (seek >= 0.0) playerPos = seek;
+        const bool stopping = playerStopReq.load();
+        const float target = playerPlaying.load() ? 1.0f : 0.0f;
+        if (ps != nullptr && (target > 0.0f || playerAmp > 1.0e-4f))
+        {
+            const auto& a = ps->audio;
+            const int len = a.getNumSamples();
+            const double step = ps->sampleRate / hostRate;
+            const bool loop = playerLoop.load();
+            const float* sl = a.getReadPointer (0);
+            const float* sr = a.getReadPointer (1);
+            auto* L = buffer.getWritePointer (0);
+            auto* R = buffer.getWritePointer (1);
+            for (int i = 0; i < numSamples; ++i)
+            {
+                playerAmp += (target - playerAmp) * 0.01f;             // fade of ~15 ms
+                if (target == 0.0f && playerAmp < 1.0e-3f) { playerAmp = 0.0f; break; }   // fully faded: hold position
+                int idx = (int) playerPos;
+                if (idx >= len - 1)
+                {
+                    if (loop && len > 1) { playerPos = 0.0; idx = 0; }
+                    else { playerPlaying = false; playerPos = 0.0; playerAmp = 0.0f; break; }
+                }
+                const float frac = (float) (playerPos - idx);
+                const float g = 0.8f * playerAmp;
+                L[i] += g * (sl[idx] + frac * (sl[idx + 1] - sl[idx]));
+                R[i] += g * (sr[idx] + frac * (sr[idx + 1] - sr[idx]));
+                playerPos += step;
+            }
+            if (! stopping) playerPosOut = playerPos;
+        }
+        if (stopping && playerAmp <= 1.0e-4f) { playerPos = 0.0; playerAmp = 0.0f; playerStopReq = false; playerPosOut = 0.0; }
     }
 
     // Clearing a finished voice's shared_ptr only decrements (the cache always holds another

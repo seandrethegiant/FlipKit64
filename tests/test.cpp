@@ -255,6 +255,33 @@ int main (int, char** argv)
     }
 
 
+
+    {   // ---------------- browser player
+        PadRomplerProcessor p; p.prepareToPlay (SR, BS);
+        auto tone = makeTone (1.0, 220.0f);                       // 1 s
+        p.playerLoad (tone, true);
+        check (run (p, 50) > 0.05f && p.playerIsPlaying(), "player: plays when loaded");
+        const double at = p.playerPositionFraction();
+        check (at > 0.05 && at < 0.1, "player: position advances (about 67 ms in)");
+        p.playerPause(); run (p, 20);
+        const double paused = p.playerPositionFraction();
+        check (run (p, 50) < 1e-4f && std::abs (p.playerPositionFraction() - paused) < 1e-9, "player: pause is silent and holds position");
+        p.playerPlay();
+        check (run (p, 20) > 0.05f && p.playerPositionFraction() > paused, "player: resumes from the paused spot");
+        p.playerSeek (0.5); run (p, 1);
+        check (std::abs (p.playerPositionFraction() - 0.5) < 0.01, "player: seek jumps to the middle");
+        p.playerStop(); run (p, 20);
+        check (! p.playerIsPlaying() && p.playerPositionFraction() == 0.0 && run (p, 20) < 1e-4f, "player: stop is silent and rewinds");
+        p.playerPlay(); run (p, 900);                             // 0.92 s past a 1 s sample
+        check (! p.playerIsPlaying() && p.playerPositionFraction() == 0.0, "player: stops at the end without loop");
+        p.playerSetLoop (true); p.playerPlay(); run (p, 900);
+        check (p.playerIsPlaying() && run (p, 20) > 0.05f, "player: keeps going with loop on");
+        AudioBuffer<float> b (2, BS); MidiBuffer m;
+        p.playerSetLoop (false); p.playerPause();
+        float firstAbs = 0; for (int i = 0; i < 20; ++i) { p.processBlock (b, m); }
+        p.playerPlay(); p.processBlock (b, m); firstAbs = std::abs (b.getSample (0, 0));
+        check (firstAbs < 0.01f, "player: fades in (no click when starting)");
+    }
    #if FLIPKIT_NETWORK
     if (auto* srv = std::getenv ("FLIPKIT_SMB_TEST"))   // network tests against a test file share
     {

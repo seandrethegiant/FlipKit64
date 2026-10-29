@@ -132,8 +132,20 @@ public:
 
     // Auditioning from the editor
     void triggerPad (int index, float velocity);
-    void previewFile (const juce::File& file);
+    void previewFile (const juce::File& file);                 // load into the browser player and play
     void previewRegion (const SamplePtr& sample, float start, float end);
+
+    // Browser player: one file at a time, with play / pause / stop / seek / loop.
+    void playerLoad (const SamplePtr& sample, bool autoPlay);
+    void playerPlay();
+    void playerPause();
+    void playerStop();                                         // fades out, back to the start
+    void playerSeek (double fraction);
+    void playerSetLoop (bool shouldLoop) { playerLoop = shouldLoop; }
+    bool playerLooping() const { return playerLoop.load(); }
+    bool playerIsPlaying() const { return playerPlaying.load(); }
+    SamplePtr playerSampleRef() const { return playerHold; }
+    double playerPositionFraction() const;
 
     // Kits
     bool saveKit (const juce::File& file);
@@ -261,6 +273,16 @@ private:
     std::vector<SamplePtr> sampleCache;
     std::vector<PadPtr> retiredPads;
     std::vector<std::shared_ptr<const Preview>> retiredPreviews;
+
+    // browser player
+    SamplePtr playerSample;                        // read by the audio thread with atomic_load
+    SamplePtr playerHold;                          // message thread's reference to the current one
+    std::vector<SamplePtr> playerRetired;
+    std::atomic<bool> playerPlaying { false }, playerLoop { false }, playerStopReq { false };
+    std::atomic<double> playerSeekReq { -1.0 };    // in source frames; -1 = none
+    std::atomic<double> playerPosOut { 0.0 };      // current position, source frames
+    double playerPos = 0.0;                        // audio thread
+    float playerAmp = 0.0f;                        // audio thread: fade in/out gain
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PadRomplerProcessor)
 };
