@@ -1,7 +1,7 @@
 # FlipKit64
 
 **A free 64-pad drum sampler, slicer and step sequencer (VST3 + standalone, Windows).**
-By seandrethegiant · Version 0.9.1 beta
+By seandrethegiant · Version 0.9.2 beta
 
 FlipKit64 is a pad instrument in the spirit of classic sampling drum machines: drop your samples onto an 8×8 grid of pads, chop loops and records into slices, shape each pad, and sequence it all in sync with your DAW. It works with any MIDI pad controller or keyboard, and the grid follows the common 64-pad "drum rack" note layout (notes 36–99) used by 8×8 pad controllers such as the Synido TempoPAD.
 
@@ -33,6 +33,7 @@ Source code and downloads: https://github.com/seandrethegiant/FlipKit64
 
 **Browser**
 - Saved locations for your sample folders and music library ("Add a folder...")
+- Network locations: browse a PC's shared folders directly ("Add a network location...", on Linux and Chromebook). Samples download once into a local cache, so they play instantly and kits keep working; if the cache is cleared, kits fetch their samples again. On Windows, add a share with "Add a folder..." and a path like `\\PC-NAME\Music`.
 - Formats: WAV, AIFF, FLAC, OGG, MP3
 
 ## Install (Windows)
@@ -44,6 +45,16 @@ Source code and downloads: https://github.com/seandrethegiant/FlipKit64
 `FlipKit64.exe` is the standalone version (no DAW needed; choose your audio and MIDI devices under Options).
 
 Windows may warn that the installer/app is from an unknown publisher, because it isn't code-signed. Choose "More info" → "Run anyway" if you trust the download.
+
+## Chromebook (Linux)
+
+FlipKit64 runs on Chromebooks through the Linux development environment (tested on ARM). Turn on Linux in ChromeOS settings, download `chromebook/install-flipkit64-chromebook.sh` from this repository into your Linux files, and run:
+
+```
+bash install-flipkit64-chromebook.sh
+```
+
+It builds FlipKit64 on the Chromebook (15-30 minutes the first time) and adds it to the launcher. ChromeOS doesn't pass USB MIDI controllers to Linux apps, so the installer also sets up a small relay: when FlipKit64 opens, a "FlipKit64 MIDI bridge" tab opens in Chrome. Allow MIDI there, keep the tab open, and choose "Chromebook MIDI" in FlipKit64's Options > Audio/MIDI Settings.
 
 ## Quick start
 
@@ -77,5 +88,7 @@ The release binaries are cross-compiled from Linux with MinGW-w64 (`mingw.cmake`
 ## License
 
 FlipKit64 is free software, released under the **GNU General Public License v3 or later** (see `LICENSE`). It uses the JUCE framework under its GPLv3 option, and the VST3 SDK (MIT license). VST is a registered trademark of Steinberg Media Technologies GmbH.
+
+Network locations use [libsmb2](https://github.com/sahlberg/libsmb2) by Ronnie Sahlberg (LGPL 2.1 or later), downloaded and built automatically on Linux and ChromeOS.
 
 This program comes with ABSOLUTELY NO WARRANTY.

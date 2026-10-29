@@ -1,4 +1,5 @@
 #include "PluginProcessor.h"
+#include "Network.h"
 #include "PluginEditor.h"
 #include <cstdlib>
 #include <cmath>
@@ -84,6 +85,19 @@ SamplePtr PadRomplerProcessor::loadSample (const File& file)
 {
     for (auto& s : sampleCache)                 // reuse if already loaded
         if (s->file == file) return s;
+
+    if (! file.existsAsFile())                  // a network sample whose cached copy is gone: fetch it again
+    {
+        juce::String server, share, remotePath;
+        if (Net::fromCacheFile (file, server, share, remotePath))
+        {
+            Net::SharedLibrary lib;
+            Net::Location loc;
+            juce::String err;
+            if (lib->findLocation (server + "/" + share, loc))
+                lib->fetchNow (loc, remotePath, err, 30000);
+        }
+    }
 
     std::unique_ptr<AudioFormatReader> reader (formats.createReaderFor (file));
     if (reader == nullptr) return {};

@@ -361,6 +361,12 @@ PadRomplerEditor::PadRomplerEditor (PadRomplerProcessor& p)
     getLookAndFeel().setColour (TextEditor::backgroundColourId, panel.brighter (0.06f));
     getLookAndFeel().setColour (TextEditor::outlineColourId, line);
     getLookAndFeel().setColour (ListBox::backgroundColourId, panel);
+    getLookAndFeel().setColour (AlertWindow::backgroundColourId, panel.brighter (0.03f));
+    getLookAndFeel().setColour (AlertWindow::textColourId, text);
+    getLookAndFeel().setColour (AlertWindow::outlineColourId, line);
+    getLookAndFeel().setColour (TextEditor::textColourId, text);
+    getLookAndFeel().setColour (TextEditor::focusedOutlineColourId, accent);
+    getLookAndFeel().setColour (Label::textColourId, text);
 
     // ---- browser
     scanThread.startThread (Thread::Priority::low);
@@ -371,6 +377,12 @@ PadRomplerEditor::PadRomplerEditor (PadRomplerProcessor& p)
     fileTree.setColour (FileTreeComponent::textColourId, text);
     fileTree.setColour (TreeView::selectedItemBackgroundColourId, right.withAlpha (0.35f));
     addAndMakeVisible (fileTree);
+    addChildComponent (netBrowser);
+    netBrowser.previewEnabled = [this] { return previewToggle.getToggleState(); };
+    netBrowser.onPreview = [this] (const File& f) { proc.previewFile (f); };
+    netBrowser.onOpen = [this] (const File& f) { fileDoubleClicked (f); };
+    netBrowser.onPathChanged = [this] { if (netActive) browserPath.setText (netBrowser.currentDisplayPath(), dontSendNotification); };
+    netBrowser.onEdit = [this] { Net::Location l; if (netLib->findLocation (currentNetKey, l)) openNetworkDialog (l, true); };
     loadPlaces();
     placesBox.setTooltip ("Sample locations - your drum kits, music library, recordings. Add any folder.");
     placesBox.onChange = [this]
@@ -385,21 +397,43 @@ PadRomplerEditor::PadRomplerEditor (PadRomplerProcessor& p)
                                   {
                                       auto f = fc.getResult();
                                       if (! f.isDirectory()) return;
-                                      places.push_back ({ f.getFileName().isEmpty() ? f.getFullPathName() : f.getFileName(), f });
+                                      places.push_back ({ f.getFileName().isEmpty() ? f.getFullPathName() : f.getFileName(), f, {} });
                                       savePlaces();
                                       setBrowserRoot (f);
                                   });
         }
+        else if (id == 1002)       // add a network location
+        {
+            rebuildPlacesBox();
+            if (! Net::isAvailable())
+            {
+                AlertWindow::showMessageBoxAsync (MessageBoxIconType::InfoIcon, "Network locations",
+                    "On Windows, choose \"Add a folder...\" and type your PC's share path, for example \\\\PC-NAME\\Music");
+                return;
+            }
+            openNetworkDialog ({}, false);
+        }
         else if (id == 1001)       // remove the current place
         {
-            places.erase (std::remove_if (places.begin(), places.end(),
-                                          [this] (const std::pair<String, File>& p) { return p.second == proc.browserRoot; }),
-                          places.end());
+            const bool removingNet = netActive;
+            const auto key = currentNetKey;
+            places.erase (std::remove_if (places.begin(), places.end(), [&] (const Place& p)
+                          {
+                              return removingNet ? p.netKey == key : (! p.isNet() && p.dir == proc.browserRoot);
+                          }), places.end());
+            if (removingNet) netLib->removeLocation (key);
             savePlaces();
-            if (! places.empty()) setBrowserRoot (places.front().second); else rebuildPlacesBox();
+            if (! places.empty())
+            {
+                if (places.front().isNet()) showNetPlace (places.front().netKey); else setBrowserRoot (places.front().dir);
+            }
+            else setBrowserRoot (proc.browserRoot);
         }
         else if (isPositiveAndBelow (id - 1, (int) places.size()))
-            setBrowserRoot (places[(size_t) (id - 1)].second);
+        {
+            const auto& p = places[(size_t) (id - 1)];
+            if (p.isNet()) showNetPlace (p.netKey); else setBrowserRoot (p.dir);
+        }
     };
     addAndMakeVisible (placesBox);
     previewToggle.setToggleState (true, dontSendNotification);
@@ -494,7 +528,17 @@ void PadRomplerEditor::loadPlaces()
     StringArray lines;
     lines.addLines (settings->getValue ("places"));
     for (auto& l : lines)
-        if (l.contains ("|")) places.push_back ({ l.upToFirstOccurrenceOf ("|", false, false), File (l.fromFirstOccurrenceOf ("|", false, false)) });
+    {
+        if (! l.contains ("|")) continue;
+        const auto name = l.upToFirstOccurrenceOf ("|", false, false);
+        const auto where = l.fromFirstOccurrenceOf ("|", false, false);
+        if (where.startsWith ("smb://"))
+        {
+            Net::Location loc;
+            if (Net::isAvailable() && netLib->findLocation (where.substring (6), loc)) places.push_back ({ name, {}, loc.key() });
+        }
+        else places.push_back ({ name, File (where), {} });
+    }
     if (places.empty())     // first run: bring over locations from Pad Rompler (the beta's old name), if any
     {
         PropertiesFile::Options old = o;
@@ -503,18 +547,18 @@ void PadRomplerEditor::loadPlaces()
         StringArray oldLines;
         oldLines.addLines (oldSettings.getValue ("places"));
         for (auto& l : oldLines)
-            if (l.contains ("|")) places.push_back ({ l.upToFirstOccurrenceOf ("|", false, false), File (l.fromFirstOccurrenceOf ("|", false, false)) });
+            if (l.contains ("|")) places.push_back ({ l.upToFirstOccurrenceOf ("|", false, false), File (l.fromFirstOccurrenceOf ("|", false, false)), {} });
     }
     if (places.empty())
     {
-        places.push_back ({ "Music", File::getSpecialLocation (File::userMusicDirectory) });
-        places.push_back ({ "Documents", File::getSpecialLocation (File::userDocumentsDirectory) });
-        places.push_back ({ "Desktop", File::getSpecialLocation (File::userDesktopDirectory) });
+        places.push_back ({ "Music", File::getSpecialLocation (File::userMusicDirectory), {} });
+        places.push_back ({ "Documents", File::getSpecialLocation (File::userDocumentsDirectory), {} });
+        places.push_back ({ "Desktop", File::getSpecialLocation (File::userDesktopDirectory), {} });
     }
     {   // always offer the recordings folder
         bool hasRec = false;
-        for (auto& p : places) hasRec = hasRec || p.second == PadRomplerProcessor::recordingsFolder();
-        if (! hasRec) places.push_back ({ "My recordings", PadRomplerProcessor::recordingsFolder() });
+        for (auto& p : places) hasRec = hasRec || (! p.isNet() && p.dir == PadRomplerProcessor::recordingsFolder());
+        if (! hasRec) places.push_back ({ "My recordings", PadRomplerProcessor::recordingsFolder(), {} });
         savePlaces();
     }
 }
@@ -522,7 +566,7 @@ void PadRomplerEditor::loadPlaces()
 void PadRomplerEditor::savePlaces()
 {
     StringArray lines;
-    for (auto& p : places) lines.add (p.first + "|" + p.second.getFullPathName());
+    for (auto& p : places) lines.add (p.name + "|" + (p.isNet() ? "smb://" + p.netKey : p.dir.getFullPathName()));
     if (settings != nullptr) { settings->setValue ("places", lines.joinIntoString ("\n")); settings->saveIfNeeded(); }
 }
 
@@ -532,19 +576,25 @@ void PadRomplerEditor::rebuildPlacesBox()
     int current = 0;
     for (int i = 0; i < (int) places.size(); ++i)
     {
-        placesBox.addItem (places[(size_t) i].first, i + 1);
-        if (places[(size_t) i].second == proc.browserRoot) current = i + 1;
+        const auto& p = places[(size_t) i];
+        placesBox.addItem (p.name, i + 1);
+        if (netActive ? p.netKey == currentNetKey : (! p.isNet() && p.dir == proc.browserRoot)) current = i + 1;
     }
     placesBox.addSeparator();
     placesBox.addItem ("Add a folder...", 1000);
+    placesBox.addItem ("Add a network location...", 1002);
     placesBox.addItem ("Remove this location", 1001);
     if (current > 0) placesBox.setSelectedId (current, dontSendNotification);
-    else placesBox.setText (proc.browserRoot.getFileName(), dontSendNotification);
+    else placesBox.setText (netActive ? netBrowser.getLocation().name : proc.browserRoot.getFileName(), dontSendNotification);
 }
 
 void PadRomplerEditor::setBrowserRoot (const File& f)
 {
     proc.browserRoot = f;
+    netActive = false;
+    currentNetKey.clear();
+    netBrowser.setVisible (false);
+    fileTree.setVisible (true);
     rebuildPlacesBox();
     if (f.isDirectory())
     {
@@ -557,6 +607,8 @@ void PadRomplerEditor::setBrowserRoot (const File& f)
 
 Array<File> PadRomplerEditor::browserSelection() const
 {
+    if (netActive)                               // network: download (if needed) and hand over the local copies
+        return const_cast<NetBrowser&> (netBrowser).selectedFilesNow();
     Array<File> fs;
     for (int i = 0; i < fileTree.getNumSelectedFiles(); ++i)
     {
@@ -660,4 +712,81 @@ void PadRomplerEditor::resized()
     browserPath.setBounds (br.removeFromTop (18));
     br.removeFromTop (4);
     fileTree.setBounds (br);
+    netBrowser.setBounds (br);
+}
+
+void PadRomplerEditor::showNetPlace (const String& key)
+{
+    Net::Location l;
+    if (! netLib->findLocation (key, l)) return;
+    netActive = true;
+    currentNetKey = l.key();
+    fileTree.setVisible (false);
+    netBrowser.setVisible (true);
+    netBrowser.setLocation (l);
+    browserPath.setText (netBrowser.currentDisplayPath(), dontSendNotification);
+    rebuildPlacesBox();
+}
+
+void PadRomplerEditor::openNetworkDialog (const Net::Location& prefill, bool editing)
+{
+    auto* w = new AlertWindow (editing ? "Edit network location" : "Add a network location",
+                               "A shared folder on your PC. To share one: on the PC, right-click the folder > "
+                               "Properties > Sharing > Advanced Sharing > Share this folder.",
+                               MessageBoxIconType::NoIcon);
+    w->addTextEditor ("server", prefill.server, "PC name or IP address (e.g. 192.168.1.20)");
+    w->addTextEditor ("share", prefill.share, "Shared folder name (e.g. Music)");
+    w->addTextEditor ("folder", prefill.folder.replaceCharacter ('/', '\\'), "Start in a subfolder (optional)");
+    w->addTextEditor ("user", prefill.user, "Windows username or Microsoft account email");
+    w->addTextEditor ("password", prefill.password, "Password", true);
+    w->addTextEditor ("name", prefill.name, "Name in FlipKit64 (optional)");
+    w->addButton (editing ? "Save" : "Add", 1, KeyPress (KeyPress::returnKey));
+    w->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+
+    SafePointer<PadRomplerEditor> safe (this);
+    const auto oldKey = prefill.key();
+    w->enterModalState (true, ModalCallbackFunction::create ([safe, w, editing, oldKey] (int result)
+    {
+        if (result != 1 || safe == nullptr) return;
+        Net::Location l;
+        l.server   = w->getTextEditorContents ("server").trim();
+        l.share    = w->getTextEditorContents ("share").trim();
+        l.folder   = Net::joinPath ({}, w->getTextEditorContents ("folder"));
+        l.user     = w->getTextEditorContents ("user").trim();
+        l.password = w->getTextEditorContents ("password");
+        l.name     = w->getTextEditorContents ("name").trim();
+
+        // Accept a pasted path like \\PC\Music\Drum Kits in the PC field.
+        auto full = l.server.replaceCharacter ('\\', '/').trimCharactersAtStart ("/");
+        if (full.startsWithIgnoreCase ("smb:")) full = full.substring (4).trimCharactersAtStart ("/");
+        if (full.containsChar ('/'))
+        {
+            auto parts = StringArray::fromTokens (full, "/", "");
+            parts.removeEmptyStrings();
+            l.server = parts[0];
+            if (parts.size() > 1 && l.share.isEmpty()) l.share = parts[1];
+            if (parts.size() > 2 && l.folder.isEmpty()) { parts.removeRange (0, 2); l.folder = parts.joinIntoString ("/"); }
+        }
+        if (l.server.isEmpty() || l.share.isEmpty())
+        {
+            AlertWindow::showMessageBoxAsync (MessageBoxIconType::WarningIcon, "Network location",
+                                              "Please enter both the PC (name or IP address) and the shared folder name.");
+            return;
+        }
+        if (l.name.isEmpty()) l.name = l.folder.isNotEmpty() ? l.folder.fromLastOccurrenceOf ("/", false, false) : l.share;
+
+        auto& ed = *safe;
+        if (editing && oldKey != l.key())
+        {
+            ed.netLib->removeLocation (oldKey);
+            for (auto& p : ed.places) if (p.netKey == oldKey) p.netKey = l.key();
+        }
+        ed.netLib->saveLocation (l);
+        bool known = false;
+        for (auto& p : ed.places)
+            if (p.netKey == l.key()) { p.name = l.name; known = true; }
+        if (! known) ed.places.push_back ({ l.name, {}, l.key() });
+        ed.savePlaces();
+        ed.showNetPlace (l.key());
+    }), true);
 }

@@ -2,6 +2,7 @@
 #include "Common.h"
 #include "SamplerPage.h"
 #include "SequencerPage.h"
+#include "NetBrowser.h"
 
 class PadsPage;
 
@@ -122,7 +123,20 @@ private:
     juce::DirectoryContentsList dirList { &audioFilter, scanThread };
     juce::FileTreeComponent fileTree { dirList };
     juce::ComboBox placesBox;
-    std::vector<std::pair<juce::String, juce::File>> places;   // browser locations (saved in settings)
+    struct Place
+    {
+        juce::String name;
+        juce::File dir;          // a local folder...
+        juce::String netKey;     // ...or a network location ("server/share")
+        bool isNet() const { return netKey.isNotEmpty(); }
+    };
+    std::vector<Place> places;                                 // browser locations (saved in settings)
+    NetBrowser netBrowser;
+    Net::SharedLibrary netLib;
+    bool netActive = false;
+    juce::String currentNetKey;
+    void showNetPlace (const juce::String& key);
+    void openNetworkDialog (const Net::Location& prefill, bool editing);
     std::unique_ptr<juce::PropertiesFile> settings;
     void loadPlaces();
     void savePlaces();

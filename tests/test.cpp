@@ -1,5 +1,6 @@
 #include "../Source/PluginProcessor.h"
 #include "../Source/SamplerPage.h"
+#include "../Source/Network.h"
 #include <cstdio>
 using namespace juce;
 
@@ -253,6 +254,80 @@ int main (int, char** argv)
         check (e.size() == 3 && e[0] == n / 4 && e[2] == 3 * n / 4, "equal slices: 4 slices = 3 markers");
     }
 
+
+   #if FLIPKIT_NETWORK
+    if (auto* srv = std::getenv ("FLIPKIT_SMB_TEST"))   // network tests against a test file share
+    {
+        auto waitList = [] (Net::Library& lib, const Net::Location& l, const String& path, bool& ok, Array<Net::Entry>& out, String& err)
+        {
+            bool done = false;
+            lib.list (l, path, [&] (bool o, Array<Net::Entry> e, String er) { ok = o; out = e; err = er; done = true; });
+            for (int i = 0; i < 300 && ! done; ++i) MessageManager::getInstance()->runDispatchLoopUntil (50);
+            return done;
+        };
+        Net::cacheRoot().deleteRecursively();
+        Net::SharedLibrary lib;
+        Net::Location loc; loc.name = "PC Music"; loc.server = srv; loc.share = "Music"; loc.user = "sean"; loc.password = "Beat$Maker1";
+        lib->saveLocation (loc);
+
+        bool ok = false; Array<Net::Entry> e; String err;
+        check (waitList (*lib, loc, "", ok, e, err) && ok, "network: list share root");
+        StringArray names; for (auto& x : e) names.add (x.name + (x.isDir ? "/" : ""));
+        check (names.contains ("Demo Kit/") && names.contains ("Sample Packs/") && ! names.contains ("readme.txt"),
+               "network: folders listed, non-audio files hidden");
+        check (waitList (*lib, loc, String::fromUTF8 ("Sample Packs/Lo-Fi \xc3\x9cn\xc3\xaf" "code Kit"), ok, e, err) && ok
+               && e.size() == 1 && e[0].name == String::fromUTF8 ("Sn\xc3\xa4re #2.wav"), "network: accented folder and file names");
+
+        String ferr;
+        auto f = lib->fetchNow (loc, "Demo Kit/Kick.wav", ferr);
+        const File src ("/srv/smbtest/Music/Demo Kit/Kick.wav");
+        MemoryBlock a, b; f.loadFileAsData (a); src.loadFileAsData (b);
+        check (f.existsAsFile() && a == b, "network: downloaded file is byte-identical");
+        check (f == Net::cacheFileFor (loc, "Demo Kit/Kick.wav"), "network: download lands in the cache path");
+        const auto t1 = f.getLastModificationTime();
+        Thread::sleep (1100);
+        lib->fetchNow (loc, "Demo Kit/Kick.wav", ferr);
+        check (f.getLastModificationTime() == t1, "network: unchanged file is not downloaded twice");
+
+        auto big = lib->fetchNow (loc, "Records/Rainy Keys 88bpm.wav", ferr);
+        check (big.getSize() == File ("/srv/smbtest/Music/Records/Rainy Keys 88bpm.wav").getSize(), "network: multi-chunk download (1.9 MB)");
+        auto uni = lib->fetchNow (loc, String::fromUTF8 ("Sample Packs/Lo-Fi \xc3\x9cn\xc3\xaf" "code Kit/Sn\xc3\xa4re #2.wav"), ferr);
+        check (uni.existsAsFile(), "network: download with accented path");
+
+        String sv, sh, rp;
+        check (Net::fromCacheFile (f, sv, sh, rp) && sv == String (srv).toLowerCase() && sh == "music" && rp == "Demo Kit/Kick.wav",
+               "network: cache path maps back to the share");
+
+        {   // a kit referencing a network sample whose cached copy was deleted
+            PadRomplerProcessor p; p.prepareToPlay (SR, BS);
+            f.deleteFile();
+            p.assignFiles (A, { f }, false);
+            check (f.existsAsFile() && ! p.getPad (A)->layers.empty(), "network: missing cached sample is re-downloaded on load");
+        }
+
+        auto bad = loc; bad.password = "wrong";
+        lib->saveLocation (bad);
+        bool done = waitList (*lib, bad, "", ok, e, err);
+        check (done && ! ok && err.containsIgnoreCase ("username or password"), ("network: wrong password -> " + err).toRawUTF8());
+        lib->saveLocation (loc);
+
+        auto noShare = loc; noShare.share = "Nope";
+        done = waitList (*lib, noShare, "", ok, e, err);
+        check (done && ! ok && err.containsIgnoreCase ("no shared folder"), ("network: wrong share -> " + err).toRawUTF8());
+
+        auto noHost = loc; noHost.server = "DESKTOP-DOESNOTEXIST";
+        done = waitList (*lib, noHost, "", ok, e, err);
+        check (done && ! ok && err.containsIgnoreCase ("IP address"), ("network: unknown PC -> " + err).toRawUTF8());
+
+        auto deadHost = loc; deadHost.server = "127.0.0.1:1";
+        done = waitList (*lib, deadHost, "", ok, e, err);
+        check (done && ! ok && err.contains ("Couldn't reach"), ("network: PC not answering -> " + err).toRawUTF8());
+
+        check (waitList (*lib, loc, "No Such Folder", ok, e, err) && ! ok && err.contains ("isn't there"), ("network: missing folder -> " + err).toRawUTF8());
+
+        check (waitList (*lib, loc, "Demo Kit", ok, e, err) && ok && e.size() == 9, "network: reconnects fine after errors");
+    }
+   #endif
     std::printf ("%d failures\n", fails);
     return fails;
 }
