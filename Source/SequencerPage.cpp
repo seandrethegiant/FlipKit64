@@ -223,7 +223,7 @@ SequencerPage::SequencerPage (EditorContext& c) : ctx (c), proc (c.getProc())
         pageButtons[i].onClick = [this, i] { followToggle.setToggleState (false, dontSendNotification); setPage (i); };
         addAndMakeVisible (pageButtons[i]);
     }
-    for (auto* t : { &followToggle, &allPadsToggle })
+    for (auto* t : { &followToggle, &allPadsToggle, &tempoPadToggle })
     {
         t->setColour (ToggleButton::textColourId, muted);
         t->setColour (ToggleButton::tickColourId, accent);
@@ -231,14 +231,19 @@ SequencerPage::SequencerPage (EditorContext& c) : ctx (c), proc (c.getProc())
     }
     followToggle.setToggleState (true, dontSendNotification);
     allPadsToggle.onClick = [this] { padsChanged(); };
+    tempoPadToggle.setTooltip ("Let the TempoPAD's mode buttons drive FlipKit64: User mode = step entry for the "
+                               "selected pad, Easy mode = top row picks patterns. Turn MMC on for Play / Stop / Record.");
+    tempoPadToggle.setToggleState (proc.tempoPadModes.load(), dontSendNotification);
+    tempoPadToggle.onClick = [this] { ctx.tempoPadModesChanged (tempoPadToggle.getToggleState()); ctrlModeChanged(); };
 
     viewport.setViewedComponent (&grid, false);
     viewport.setScrollBarsShown (true, false);
     addAndMakeVisible (viewport);
 
-    hint.setText ("Click a step to turn it on (Shift = accent). Drag up/down on a step for velocity. "
+    defaultHint = String ("Click a step to turn it on (Shift = accent). Drag up/down on a step for velocity. "
                   "Right-click for velocity and ratchets (rolls). Arm Rec and play the TempoPAD while it loops to record. "
-                  "Plays with LUNA's transport; Play runs it on its own.", dontSendNotification);
+                  "Plays with LUNA's transport; Play runs it on its own.");
+    hint.setText (defaultHint, dontSendNotification);
     styleLabel (hint, 11.0f);
     hint.setJustificationType (Justification::topLeft);
     addAndMakeVisible (hint);
@@ -286,8 +291,39 @@ void SequencerPage::padsChanged()
     grid.repaint();
 }
 
+void SequencerPage::ctrlModeChanged()
+{
+    String h = defaultHint;
+    if (proc.tempoPadModes.load())
+    {
+        const int m = proc.ctrlMode.load();
+        if (m == PadRomplerProcessor::ctrlSteps)
+        {
+            auto ps = proc.getPad (ctx.getSelectedPad());
+            h = "TempoPAD User mode: each pad turns a step on or off for " + (ps->name.isEmpty() ? String ("the selected pad") : ps->name)
+              + " (top-left pad = step 1, reading across like a page). Switch to Drum mode, hit another pad, and come back to program that one.";
+        }
+        else if (m == PadRomplerProcessor::ctrlPatterns)
+            h = "TempoPAD Easy mode: the top row of pads picks patterns 1-8 (it changes at the end of the bar while playing). "
+                "The other pads play as normal. Switch to Drum mode to go back.";
+    }
+    hint.setText (h, dontSendNotification);
+    grid.repaint();
+}
+
 void SequencerPage::tick()
 {
+    tempoPadToggle.setToggleState (proc.tempoPadModes.load(), dontSendNotification);
+    recButton.setToggleState (proc.seqRecord.load(), dontSendNotification);
+    const auto edits = proc.stepEdits.load();
+    if (edits != lastStepEdits)
+    {
+        lastStepEdits = edits;
+        const int st = proc.lastStepEdit.load();
+        padsChanged();
+        if (st >= 0 && st / 16 != grid.page && ! (followToggle.getToggleState() && proc.playStep.load() >= 0)) setPage (st / 16);
+        if (proc.ctrlMode.load() == PadRomplerProcessor::ctrlSteps) ctrlModeChanged();
+    }
     const bool host = proc.hostPlaying.load();
     const bool internal = proc.internalPlaying.load();
     playButton.setButtonText (internal ? "Stop" : "Play");
@@ -350,6 +386,7 @@ void SequencerPage::resized()
 
     area.removeFromTop (8);
     auto pagesRow = area.removeFromTop (26);
+    tempoPadToggle.setBounds (pagesRow.removeFromRight (140));
     allPadsToggle.setBounds (pagesRow.removeFromRight (130));
     followToggle.setBounds (pagesRow.removeFromRight (140));
     pagesRow.removeFromLeft (StepGrid::nameW);

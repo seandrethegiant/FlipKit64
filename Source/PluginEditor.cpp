@@ -493,8 +493,17 @@ PadRomplerEditor::PadRomplerEditor (PadRomplerProcessor& p)
         sequencerPage.padsChanged();
     };
 
+    proc.tempoPadModes = settings->getBoolValue ("tempoPadModes", true);
+    styleLabel (ctrlLabel, 11.0f, accent);
+    ctrlLabel.setFont (Font (11.0f, Font::bold));
+    ctrlLabel.setJustificationType (Justification::centred);
+    ctrlLabel.setTooltip ("FlipKit64 follows the TempoPAD's mode buttons: Drum = play pads, "
+                          "User = step entry, Easy = pattern select. Turn this off in the Sequencer tab.");
+    addAndMakeVisible (ctrlLabel);
+
     showTab (0);
     selectPad (0);
+    updateCtrlLabel();
     setSize (1280, 780);
     startTimerHz (30);
 }
@@ -636,6 +645,7 @@ void PadRomplerEditor::openInSampler (const File& file)
 void PadRomplerEditor::selectPad (int index)
 {
     selectedPad = jlimit (0, PadLayout::numPads - 1, index);
+    proc.stepTarget = selectedPad;
     padsPage.refreshPanel();
     samplerPage.selectedPadChanged();
 }
@@ -669,8 +679,45 @@ void PadRomplerEditor::fileDoubleClicked (const File& f)
     else dropFiles (selectedPad, { f });                  // otherwise: put it on the selected pad
 }
 
+void PadRomplerEditor::tempoPadModesChanged (bool on)
+{
+    proc.tempoPadModes = on;
+    if (settings != nullptr) { settings->setValue ("tempoPadModes", on); settings->saveIfNeeded(); }
+    if (! on) proc.ctrlMode = PadRomplerProcessor::ctrlNone;
+    updateCtrlLabel();
+}
+
+void PadRomplerEditor::updateCtrlLabel()
+{
+    String t;
+    if (proc.tempoPadModes.load())
+        switch (proc.ctrlMode.load())
+        {
+            case PadRomplerProcessor::ctrlPads:     t = "TEMPOPAD: PADS"; break;
+            case PadRomplerProcessor::ctrlSteps:    t = "TEMPOPAD: STEPS"; break;
+            case PadRomplerProcessor::ctrlPatterns: t = "TEMPOPAD: PATTERNS"; break;
+            default: break;
+        }
+    ctrlLabel.setText (t, dontSendNotification);
+}
+
 void PadRomplerEditor::timerCallback()
 {
+    // Follow the TempoPAD's mode buttons: User/Easy open the sequencer, Drum goes back.
+    const int mode = proc.ctrlMode.load();
+    if (mode != lastCtrlMode)
+    {
+        const bool toSeq = mode == PadRomplerProcessor::ctrlSteps || mode == PadRomplerProcessor::ctrlPatterns;
+        if (proc.tempoPadModes.load())
+        {
+            if (toSeq && currentTab != 2) { tabBeforeCtrl = currentTab; showTab (2); }
+            if (mode == PadRomplerProcessor::ctrlSteps) selectPad (proc.stepTarget.load());
+            if (mode == PadRomplerProcessor::ctrlPads && tabBeforeCtrl >= 0) { showTab (tabBeforeCtrl); tabBeforeCtrl = -1; }
+        }
+        lastCtrlMode = mode;
+        updateCtrlLabel();
+        sequencerPage.ctrlModeChanged();
+    }
     previewStrip.tick();
     if (padsPage.isVisible()) padsPage.tick();
     samplerPage.tick();
@@ -709,6 +756,7 @@ void PadRomplerEditor::resized()
     saveKitButton.setBounds (top.removeFromRight (96));
     top.removeFromRight (8);
     supportLink.setBounds (top.removeFromRight (140));
+    ctrlLabel.setBounds (top.reduced (6, 0));
 
     area.reduce (12, 0);
     area.removeFromBottom (12);

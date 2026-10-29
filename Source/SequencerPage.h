@@ -38,6 +38,7 @@ public:
     void padsChanged();
     PatternData& pattern();
     int visiblePage() const { return grid.page; }
+    void ctrlModeChanged();                // the TempoPAD switched modes (hint text)
 
 private:
     EditorContext& ctx;
@@ -49,7 +50,9 @@ private:
     juce::ComboBox lengthBox, resBox;
     juce::TextButton patButtons[Seq::numPatterns];
     juce::TextButton pageButtons[4];
-    juce::ToggleButton followToggle { "Follow playhead" }, allPadsToggle { "Show all pads" };
+    juce::ToggleButton followToggle { "Follow playhead" }, allPadsToggle { "Show all pads" }, tempoPadToggle { "TempoPAD modes" };
+    juce::uint32 lastStepEdits = 0;
+    juce::String defaultHint;
     StepGrid grid { ctx, *this };
     juce::Viewport viewport;
     juce::Label hint;

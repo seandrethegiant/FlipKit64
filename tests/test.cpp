@@ -1,6 +1,7 @@
 #include "../Source/PluginProcessor.h"
 #include "../Source/SamplerPage.h"
 #include "../Source/Network.h"
+#include "../Source/PluginEditor.h"
 #include <cstdio>
 using namespace juce;
 
@@ -182,6 +183,97 @@ int main (int, char** argv)
         check (hits (q, 36) == hi + 1, "internal transport plays the pattern on its own");
         q.internalPlaying = false;
         q.setPlayHead (nullptr);
+    }
+
+    {   // ---------------- TempoPAD controller modes (MMC transport, User = steps, Easy = patterns)
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        q.assignRegion (A, makeTone (0.05, 1000.0f), 0, 1, "click");
+        auto send = [&] (const MidiMessage& m) { AudioBuffer<float> b (2, BS); MidiBuffer mb; mb.addEvent (m, 0); q.processBlock (b, mb); };
+        auto mmc = [&] (uint8_t cmd) { const uint8_t d[] = { 0x7F, 0x7F, 0x06, cmd }; send (MidiMessage::createSysExMessage (d, 4)); };
+        auto easy = [&] (uint8_t v) { send (MidiMessage::createSysExMessage (&v, 1)); };
+
+        mmc (0x02);
+        check (q.internalPlaying.load(), "MMC Play starts FlipKit64's own transport");
+        mmc (0x06);
+        check (q.seqRecord.load(), "MMC Record arms live record");
+        mmc (0x01);
+        check (! q.internalPlaying.load() && ! q.seqRecord.load(), "MMC Stop stops and disarms record");
+        mmc (0x06);
+        check (q.seqRecord.load() && q.internalPlaying.load(), "MMC Record while stopped starts playing and recording");
+        mmc (0x01);
+
+        send (MidiMessage::noteOn (1, 40, 1.0f));
+        check (q.ctrlMode.load() == PadRomplerProcessor::ctrlPads && q.stepTarget.load() == padOfNote (40),
+               "Drum-mode hit picks the pad that User mode will program");
+        q.stepTarget = A;
+        const int topLeft = PadLayout::noteForPad (0);                  // first pad of the grid = step 1
+        const uint32_t h0 = hits (q, 36);
+        send (MidiMessage::noteOn (3, topLeft, 1.0f));
+        check (q.ctrlMode.load() == PadRomplerProcessor::ctrlSteps && q.patterns[0].vel[A][0].load() > 0,
+               "User mode (channel 3): a pad press turns step 1 on for the selected pad");
+        check (hits (q, 36) == h0 + 1, "User mode: turning a step on plays the sound once");
+        send (MidiMessage::noteOn (3, PadLayout::noteForPad (5), 1.0f));
+        check (q.patterns[0].vel[A][5].load() > 0, "User mode: sixth pad = step 6");
+        send (MidiMessage::noteOn (3, topLeft, 1.0f));
+        check (q.patterns[0].vel[A][0].load() == 0, "User mode: pressing it again turns the step off");
+        send (MidiMessage::noteOn (3, PadLayout::noteForPad (40), 1.0f));
+        check (q.patterns[0].vel[A][40].load() == 0, "User mode: steps past the pattern length are ignored");
+
+        easy (0x3F);                                                    // top-right pad
+        check (q.ctrlMode.load() == PadRomplerProcessor::ctrlPatterns && q.currentPattern.load() == 7,
+               "Easy mode: top-right pad selects pattern 8");
+        easy (0x7F);
+        check (q.currentPattern.load() == 7, "Easy mode: pad release does nothing");
+        const uint32_t h1 = hits (q, 36);
+        easy (0x00);                                                    // bottom-left pad
+        check (hits (q, 36) == h1 + 1 && q.currentPattern.load() == 7, "Easy mode: other pads still play");
+
+        q.tempoPadModes = false;
+        const uint32_t h2 = hits (q, 36);
+        send (MidiMessage::noteOn (3, 36, 1.0f));
+        check (hits (q, 36) == h2 + 1 && q.patterns[7].vel[A][0].load() == 0, "TempoPAD modes off: channel 3 just plays");
+        easy (0x3C);
+        check (q.currentPattern.load() == 7, "TempoPAD modes off: Easy-mode messages are ignored");
+    }
+
+    if (std::getenv ("DISPLAY") != nullptr)
+    {   // ---------------- editor follows the TempoPAD's mode buttons
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        std::unique_ptr<AudioProcessorEditor> ed (q.createEditor());
+        auto visiblePage = [&]() -> String {
+            for (auto* c : ed->getChildren())
+                if (c->isVisible()) {
+                    if (dynamic_cast<SequencerPage*> (c)) return "seq";
+                    if (dynamic_cast<PadsPage*> (c)) return "pads";
+                    if (dynamic_cast<SamplerPage*> (c)) return "sampler";
+                }
+            return "?";
+        };
+        auto send = [&] (const MidiMessage& m) { AudioBuffer<float> b (2, BS); MidiBuffer mb; mb.addEvent (m, 0); q.processBlock (b, mb); };
+        const bool was = q.tempoPadModes.load();
+        q.tempoPadModes = true;
+        MessageManager::getInstance()->runDispatchLoopUntil (100);
+        const String start = visiblePage();
+        send (MidiMessage::noteOn (1, 45, 1.0f));
+        MessageManager::getInstance()->runDispatchLoopUntil (100);
+        send (MidiMessage::noteOn (3, PadLayout::noteForPad (2), 1.0f));
+        MessageManager::getInstance()->runDispatchLoopUntil (150);
+        const String inSteps = visiblePage();
+        if (auto* snap = std::getenv ("FLIPKIT_SNAP"))
+        {
+            ed->setSize (1280, 780);
+            auto img = ed->createComponentSnapshot (ed->getLocalBounds());
+            const File snapFile { String (snap) }; FileOutputStream fo { snapFile }; fo.setPosition (0); fo.truncate();
+            PNGImageFormat().writeImageToStream (img, fo);
+        }
+        auto* pe = dynamic_cast<PadRomplerEditor*> (ed.get());
+        check (start == "pads" && inSteps == "seq" && pe != nullptr && pe->getSelectedPad() == padOfNote (45)
+               && q.patterns[0].vel[padOfNote (45)][2].load() > 0,
+               "editor: User mode opens the sequencer on the pad you last hit");
+        send (MidiMessage::noteOn (1, 45, 1.0f));
+        MessageManager::getInstance()->runDispatchLoopUntil (150);
+        check (visiblePage() == "pads", "editor: back to Drum mode returns to the Pads tab");
+        q.tempoPadModes = was;
     }
 
     {   // ---------------- state round trip (pad params + patterns)

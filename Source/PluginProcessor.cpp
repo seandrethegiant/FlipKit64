@@ -597,23 +597,17 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
     }
     const bool tapActive = tapRunning && tapS != nullptr && tapMode.load() != tapOff;
 
-    for (const auto meta : midi)
+    // A pad hit: plays it, records it when Rec is armed, or marks a chop point during tap chop.
+    auto playPad = [&] (int pad, float vel, int pos)
     {
-        const auto msg = meta.getMessage();
-        const int pos = jlimit (0, numSamples - 1, meta.samplePosition);
-        if (msg.isNoteOn())
-        {
-            const int pad = noteToPad[msg.getNoteNumber()];
-            if (pad < 0) continue;
             if (tapActive)                        // tap chop: the hit marks a chop point instead of playing
             {
                 int s1, n1, s2, n2;
                 tapFifo.prepareToWrite (1, s1, n1, s2, n2);
                 if (n1 > 0) { tapBuf[s1] = { pad, tapBlockStart + pos * tapStep }; tapFifo.finishedWrite (1); }
                 hitCounter[pad].fetch_add (1, std::memory_order_relaxed);   // still flash the pad
-                continue;
+                return;
             }
-            const float vel = msg.getFloatVelocity();
             if (numHits < maxHits) hits[numHits++] = { pos, pad, vel };
 
             if (running && seqRecord.load())      // live record, quantized to the nearest step
@@ -633,6 +627,73 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
                 pat.ratchet[pad][idx].store (1);
                 if (timeOf (best) > t) skipOnce[pad][idx] = 1;   // already heard it; don't double-trigger
             }
+    };
+
+    // TempoPAD User mode: a pad press turns that step on/off for the selected pad (top-left = step 1).
+    auto toggleStep = [&] (int step, float vel, int pos)
+    {
+        auto& pat = patterns[jlimit (0, Seq::numPatterns - 1, currentPattern.load())];
+        if (step >= jlimit (1, Seq::maxSteps, pat.length.load())) return;
+        const int target = jlimit (0, PadLayout::numPads - 1, stepTarget.load());
+        if (pat.vel[target][step].load() > 0)
+            pat.vel[target][step].store (0);
+        else
+        {
+            pat.vel[target][step].store ((uint8_t) jlimit (1, 127, (int) std::lround (vel * 127.0f)));
+            pat.ratchet[target][step].store (1);
+            if (numHits < maxHits) hits[numHits++] = { pos, target, vel * 0.7f };   // hear what you added
+        }
+        lastStepEdit = step;
+        stepEdits.fetch_add (1);
+    };
+
+    const bool padModes = tempoPadModes.load();
+    for (const auto meta : midi)
+    {
+        const auto msg = meta.getMessage();
+        const int pos = jlimit (0, numSamples - 1, meta.samplePosition);
+        if (msg.isSysEx())
+        {
+            const auto* d = msg.getSysExData();
+            const int n = msg.getSysExDataSize();
+            if (n >= 4 && d[0] == 0x7F && d[2] == 0x06)          // MMC transport (TempoPAD with MMC on)
+            {
+                switch (d[3])
+                {
+                    case 0x01: case 0x09: internalPlaying = false; seqRecord = false; break;   // stop / pause
+                    case 0x02: case 0x03: if (! hostIsPlaying) internalPlaying = true; break;  // play
+                    case 0x06:                                                            // record: toggle
+                        seqRecord = ! seqRecord.load();
+                        if (seqRecord.load() && ! hostIsPlaying) internalPlaying = true;
+                        break;
+                    case 0x07: seqRecord = false; break;                                  // record exit
+                    default: break;
+                }
+            }
+            else if (n == 1 && padModes)                          // TempoPAD Easy mode: one byte per pad
+            {
+                const int b = d[0];
+                if ((b & 0x40) != 0) continue;                    // release
+                const int pad = noteToPad[36 + (b & 0x3F)];
+                if (pad < 0) continue;
+                ctrlMode = ctrlPatterns;
+                if (pad / PadLayout::cols == 0) selectPattern (pad % PadLayout::cols);   // top row = patterns 1-8
+                else playPad (pad, 0.8f, pos);
+            }
+            continue;
+        }
+        if (msg.isNoteOn())
+        {
+            const int pad = noteToPad[msg.getNoteNumber()];
+            if (pad < 0) continue;
+            if (padModes && msg.getChannel() == 3)               // TempoPAD User mode
+            {
+                ctrlMode = ctrlSteps;
+                toggleStep (pad, msg.getFloatVelocity(), pos);
+                continue;
+            }
+            if (padModes) { ctrlMode = ctrlPads; stepTarget = pad; }
+            playPad (pad, msg.getFloatVelocity(), pos);
         }
         else if (msg.isAllNotesOff() || msg.isAllSoundOff())
         {

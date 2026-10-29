@@ -103,6 +103,7 @@ public:
     juce::Array<juce::File> browserSelection() const override;
     void dropFiles (int padIndex, const juce::Array<juce::File>& files) override;
     void openInSampler (const juce::File& file) override;
+    void tempoPadModesChanged (bool on) override;
 
     void showTab (int tab);
     bool keyPressed (const juce::KeyPress&) override;
@@ -162,6 +163,9 @@ private:
     juce::HyperlinkButton supportLink { "Support FlipKit64", juce::URL ("https://ko-fi.com/seandrethegiant") };
     juce::Slider masterSlider;
     juce::Label masterLabel;
+    juce::Label ctrlLabel;                 // which TempoPAD mode FlipKit64 is following
+    int lastCtrlMode = -1, tabBeforeCtrl = -1;
+    void updateCtrlLabel();
 
     juce::Rectangle<int> browserArea, contentArea;
 

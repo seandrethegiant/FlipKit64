@@ -1,7 +1,7 @@
 # FlipKit64
 
 **A free 64-pad drum sampler, slicer and step sequencer (VST3 + standalone, Windows).**
-By seandrethegiant · Version 0.9.3 beta
+By seandrethegiant · Version 0.9.4 beta
 
 FlipKit64 is a pad instrument in the spirit of classic sampling drum machines: drop your samples onto an 8×8 grid of pads, chop loops and records into slices, shape each pad, and sequence it all in sync with your DAW. It works with any MIDI pad controller or keyboard, and the grid follows the common 64-pad "drum rack" note layout (notes 36–99) used by 8×8 pad controllers such as the Synido TempoPAD.
 
@@ -37,6 +37,14 @@ Source code and downloads: https://github.com/seandrethegiant/FlipKit64
 - Network locations: browse a PC's shared folders directly ("Add a network location...", on Linux and Chromebook). Samples download once into a local cache, so they play instantly and kits keep working; if the cache is cleared, kits fetch their samples again. On Windows, add a share with "Add a folder..." and a path like `\\PC-NAME\Music`.
 - Formats: WAV, AIFF, FLAC, OGG, MP3
 
+**Synido TempoPAD**
+FlipKit64 follows the TempoPAD's own mode buttons, so you can build a beat from the controller:
+- **Drum** (or Key): play the pads.
+- **User**: each pad turns a step on or off for the pad you last hit (top-left pad = step 1, reading across like a page). The Sequencer opens on that pad; switch back to Drum, hit another pad, and come back to program that one.
+- **Easy**: the top row of pads picks patterns 1-8 (changing at the end of the bar while playing); the other pads play.
+- **Play / Stop / Record**: turn the TempoPAD's **MMC** button on. Play starts FlipKit64's sequencer, Record arms live recording (and starts playing if stopped), Stop stops both.
+- Turn it off with **TempoPAD modes** in the Sequencer tab. The other buttons (Mood, Octave, Transpose, Velocity, Light) only change the controller's own settings. If your pads play the wrong sounds, Octave or Transpose has probably shifted them.
+
 ## Install (Windows)
 
 1. Download and unzip the release.
@@ -55,7 +63,9 @@ FlipKit64 runs on Chromebooks through the Linux development environment (tested 
 bash install-flipkit64-chromebook.sh
 ```
 
-It builds FlipKit64 on the Chromebook (15-30 minutes the first time) and adds it to the launcher. ChromeOS doesn't pass USB MIDI controllers to Linux apps, so the installer also sets up a small relay: when FlipKit64 opens, a "FlipKit64 MIDI bridge" tab opens in Chrome. Allow MIDI there, keep the tab open, and choose "Chromebook MIDI" in FlipKit64's Options > Audio/MIDI Settings.
+It builds FlipKit64 on the Chromebook (15-30 minutes the first time) and adds it to the launcher. ChromeOS doesn't pass USB MIDI controllers to Linux apps, so the installer also sets up a small relay: when FlipKit64 opens, a "FlipKit64 MIDI bridge" tab opens in Chrome. Allow MIDI there (including "control and reprogram your MIDI devices", which carries the TempoPAD's transport buttons and Easy mode), keep the tab open, and choose "Chromebook MIDI" in FlipKit64's Options > Audio/MIDI Settings.
+
+Already installed? `chromebook/update-flipkit64-bridge.sh` updates just the MIDI bridge without rebuilding. The bridge also has a button tester at `http://localhost:8765/monitor` that shows exactly what each pad and button on your controller sends.
 
 ## Quick start
 

@@ -164,6 +164,17 @@ public:
     std::atomic<double> hostBpm { 120.0 };
     void selectPattern (int p);
 
+    // ---- TempoPAD modes: the controller's own mode buttons switch what its pads do in FlipKit64.
+    // Drum/Key (channel 1 notes) = play pads, User (channel 3 notes) = toggle steps for the selected
+    // pad, Easy (Synido's short SysEx per pad) = top row picks patterns, the rest play.
+    // Play / Stop / Record arrive as MMC when the controller's MMC button is on.
+    enum CtrlMode { ctrlNone = 0, ctrlPads, ctrlSteps, ctrlPatterns };
+    std::atomic<bool> tempoPadModes { true };
+    std::atomic<int> ctrlMode { ctrlNone };
+    std::atomic<int> stepTarget { 0 };          // pad that Steps-mode presses write to
+    std::atomic<int> lastStepEdit { -1 };
+    std::atomic<uint32_t> stepEdits { 0 };      // bumped on each Steps-mode edit (editor repaints)
+
     // ---- Recording / resampling
     enum RecState { recIdle = 0, recArmed, recRecording, recFinished };
     std::atomic<int> recState { recIdle };
