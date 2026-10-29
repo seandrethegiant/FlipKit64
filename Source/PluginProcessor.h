@@ -91,6 +91,53 @@ namespace Seq
     }
 }
 
+// Keys tracks: melodic lanes that play one pad's sound pitched across the keyboard.
+namespace Keys
+{
+    constexpr int numTracks = 4;
+    constexpr int lowNote = 24, highNote = 107;          // piano roll range (C0..B6 with middle C = C3)
+    struct Note { uint8_t pitch, step, len, vel; };       // step and len in the lane's steps
+    using NoteList = std::vector<Note>;
+    using NotesPtr = std::shared_ptr<const NoteList>;     // immutable once made; swapped whole
+    inline bool sameNotes (const NotesPtr& a, const NotesPtr& b)
+    {
+        const size_t na = a ? a->size() : 0, nb = b ? b->size() : 0;
+        if (na != nb) return false;
+        for (size_t i = 0; i < na; ++i)
+        {
+            const auto& x = (*a)[i]; const auto& y = (*b)[i];
+            if (x.pitch != y.pitch || x.step != y.step || x.len != y.len || x.vel != y.vel) return false;
+        }
+        return true;
+    }
+
+    // Scales for highlighting and snapping (semitone masks from the root).
+    constexpr int numScales = 8;
+    inline const char* scaleName (int s)
+    {
+        static const char* n[] = { "Chromatic", "Major", "Minor", "Dorian", "Mixolydian", "Minor pentatonic", "Major pentatonic", "Blues" };
+        return n[juce::jlimit (0, numScales - 1, s)];
+    }
+    inline bool inScale (int s, int root, int pitch)
+    {
+        static const int masks[] = { 0xFFF, 0xAB5, 0x5AD, 0x6AD, 0x6B5, 0x4A9, 0x295, 0x4E9 };
+        const int pc = ((pitch - root) % 12 + 12) % 12;
+        return (masks[juce::jlimit (0, numScales - 1, s)] >> pc) & 1;
+    }
+}
+
+// One Keys track's notes inside a pattern, with its own length and step size.
+struct KeysLane
+{
+    std::atomic<int> length { 16 };
+    std::atomic<int> stepsPer2Beats { 4 };                // 1/8 by default (16 steps = 2 bars)
+    Keys::NotesPtr notes;                                 // nullptr = empty; use get / set
+    double stepLength() const { return 2.0 / juce::jmax (1, stepsPer2Beats.load()); }
+    Keys::NotesPtr get() const { return std::atomic_load (&notes); }
+    void set (Keys::NotesPtr n) { std::atomic_store (&notes, std::move (n)); }
+    void reset() { length = 16; stepsPer2Beats = 4; set (nullptr); }
+};
+
 struct PatternData
 {
     std::atomic<int> length { 16 };          // steps (16/32/48/64)
@@ -102,8 +149,11 @@ struct PatternData
     std::atomic<uint8_t> cond[PadLayout::numPads][Seq::maxSteps];     // Seq::Cond
     std::atomic<uint8_t> nudge[PadLayout::numPads][Seq::maxSteps];    // 128 = on the grid; 78..178 = -50..+50 % of a step
 
+    KeysLane lanes[Keys::numTracks];
+
     PatternData() { clear(); }
-    void clear()
+    void clear() { clearDrums(); for (auto& l : lanes) l.reset(); }
+    void clearDrums()
     {
         for (int p = 0; p < PadLayout::numPads; ++p)
             for (int s = 0; s < Seq::maxSteps; ++s) { vel[p][s].store (0); resetStep (p, s); }
@@ -124,10 +174,20 @@ struct PatternData
         length.store (o.length.load()); stepsPer2Beats.store (o.stepsPer2Beats.load());
         for (int p = 0; p < PadLayout::numPads; ++p)
             for (int s = 0; s < Seq::maxSteps; ++s) copyStep (p, s, o, p, s);
+        for (int t = 0; t < Keys::numTracks; ++t)
+        {
+            lanes[t].length.store (o.lanes[t].length.load());
+            lanes[t].stepsPer2Beats.store (o.lanes[t].stepsPer2Beats.load());
+            lanes[t].set (o.lanes[t].get());
+        }
     }
     bool sameAs (const PatternData& o) const
     {
         if (length.load() != o.length.load() || stepsPer2Beats.load() != o.stepsPer2Beats.load()) return false;
+        for (int t = 0; t < Keys::numTracks; ++t)
+            if (lanes[t].length.load() != o.lanes[t].length.load() || lanes[t].stepsPer2Beats.load() != o.lanes[t].stepsPer2Beats.load()
+                 || ! Keys::sameNotes (lanes[t].get(), o.lanes[t].get()))
+                return false;
         for (int p = 0; p < PadLayout::numPads; ++p)
             for (int s = 0; s < Seq::maxSteps; ++s)
                 if (vel[p][s].load() != o.vel[p][s].load() || (vel[p][s].load() > 0
@@ -217,6 +277,26 @@ public:
     std::atomic<double> hostBpm { 120.0 };
     void selectPattern (int p);
 
+    // ---- Keys tracks (settings shared by all patterns; the notes live in each pattern's lanes)
+    struct KeysTrack
+    {
+        std::atomic<int> sourcePad { -1 };       // the pad whose sound (and shaping) this track plays
+        std::atomic<int> root { 60 };            // the note the sample sounds at unpitched (60 = C3)
+        std::atomic<bool> mono { false };
+        std::atomic<float> glideMs { 0.0f };     // mono only: slide into the next note
+        std::atomic<float> level { 1.0f };
+        juce::String name;                       // message thread
+    };
+    KeysTrack keysTracks[Keys::numTracks];
+    std::atomic<int> keysInput { -1 };           // track that pad notes play (-1 = pads play drums)
+    std::atomic<int> scaleRoot { 0 }, scaleType { 0 };
+    std::atomic<int> keysStep[Keys::numTracks];  // playhead per track for the editor (-1 = stopped)
+    Keys::NotesPtr makeNotes (Keys::NoteList);   // message thread: every note list is made here
+    void triggerKey (int track, int pitch, float velocity);   // audition from the editor
+    void resetKeysTracks();
+    void drainKeyRecordings();                   // message thread: live-recorded notes -> lanes
+    std::atomic<uint32_t> keysRecorded { 0 };    // bumped when recorded notes land (editor repaints)
+
     // ---- TempoPAD modes: the controller's own mode buttons switch what its pads do in FlipKit64.
     // Drum/Key (channel 1 notes) = play pads, User (channel 3 notes) = toggle steps for the selected
     // pad, Easy (Synido's short SysEx per pad) = top row picks patterns, the rest play.
@@ -267,9 +347,24 @@ private:
     void kitFromXml (const juce::XmlElement& xml);
     void timerCallback() override;          // frees retired snapshots off the audio thread
 
-    struct Hit { int pos; int pad; float velocity; };
+    // A hit to start this block: a pad, or (track >= 0) a Keys note; velocity < 0 = that key's note-off.
+    // gate = samples the note sounds (-1 = held until its note-off).
+    struct Hit { int pos; int pad; float velocity; int track = -1; int pitch = 0; juce::int64 gate = 0; };
     void handleHit (int padIndex, float velocity);
-    void startVoice (const SamplePtr& s, const PadState* pad, float gain, int padIndex, float start = 0.0f, float end = 1.0f);
+    void handleKeyHit (int track, int pitch, float velocity, juce::int64 gate);
+    void releaseKey (int track, int pitch);
+    struct Voice;
+    Voice* startVoice (const SamplePtr& s, const PadState* pad, float gain, int padIndex, float start = 0.0f, float end = 1.0f,
+                       int keysTrack = -1, double semis = 0.0, juce::int64 gate = 0);
+    void scheduleKeys (double ppq0, double ppqPerSample, int numSamples, Hit* hits, int& numHits, int maxHits);
+    std::vector<Keys::NotesPtr> noteRegistry;    // message thread: keeps every list alive until nothing uses it
+
+    // Live-recorded keys (audio thread -> message thread)
+    struct KeyDown { int track = -1; double ppq = -1.0; float vel = 0.0f; int pattern = 0; };
+    KeyDown keyDown[128];
+    struct KeyRec { int track, pattern, pitch; double on, off; float vel; };
+    juce::AbstractFifo keyRecFifo { 256 };
+    KeyRec keyRecBuf[256];
     void renderVoices (juce::AudioBuffer<float>& buffer, int start, int count);
     void scheduleSequencer (double ppq0, double ppqPerSample, int numSamples, Hit* hits, int& numHits, int maxHits);
 
@@ -315,7 +410,12 @@ private:
         float fg = 0, fk = 0, fa1 = 0, fa2 = 0, fa3 = 0;
         float ic1[2] {}, ic2[2] {};
         bool active = false;
-        void release (double sr) { releasing = true; releaseCoef = (float) std::exp (-1.0 / (0.004 * sr)); }
+        // Keys notes
+        int keysTrack = -1, keysPitch = 0;
+        juce::int64 gateLeft = 0;              // >0 counts down to the note-off, -1 = held, 0 = none
+        double baseStep = 1.0, stepTarget = 1.0;
+        float glideCoef = 0.0f;
+        void release (double sr, double ms = 4.0) { releasing = true; releaseCoef = (float) std::exp (-1.0 / (ms * 0.001 * sr)); }
     };
     static constexpr int maxVoices = 128;
     Voice voices[maxVoices];
@@ -331,7 +431,7 @@ private:
     uint8_t skipOnce[PadLayout::numPads][Seq::maxSteps] {};
 
     // editor -> audio requests (lock-free single-producer single-consumer)
-    struct Request { int pad; float velocity; };
+    struct Request { int pad; float velocity; int track = -1; int pitch = 0; };
     juce::AbstractFifo reqFifo { 64 };
     Request reqBuf[64];
     struct Preview { SamplePtr sample; float start = 0, end = 1; };

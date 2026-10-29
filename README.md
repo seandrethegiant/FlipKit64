@@ -1,7 +1,7 @@
 # FlipKit64
 
 **A free 64-pad drum sampler, slicer and step sequencer (VST3 + standalone, Windows).**
-By seandrethegiant · Version 0.9.5 beta
+By seandrethegiant · Version 0.9.6 beta
 
 FlipKit64 is a pad instrument in the spirit of classic sampling drum machines: drop your samples onto an 8×8 grid of pads, chop loops and records into slices, shape each pad, and sequence it all in sync with your DAW. It works with any MIDI pad controller or keyboard, and the grid follows the common 64-pad "drum rack" note layout (notes 36–99) used by 8×8 pad controllers such as the Synido TempoPAD.
 
@@ -32,6 +32,10 @@ Source code and downloads: https://github.com/seandrethegiant/FlipKit64
 - **Capture**: press it after jamming on the pads while the pattern loops, and the last loop of what you played becomes part of the pattern, even with Rec off
 - **Roll** (note repeat): hold a pad and it repeats at 1/8, 1/16 or 1/32, in time with the pattern
 - **Undo / Redo** for every sequencer change (Ctrl+Z, Ctrl+Shift+Z)
+- **Keys tracks**: four melodic tracks next to the drums (Drums / Keys 1 / Bass / Keys 3 / Keys 4 at the top of the Sequencer). Each plays one pad's sound pitched across the keyboard, keeping that pad's tuning, envelope and filter, so a chop or a one-shot becomes an instrument. Set the **Sound** (the pad), the **Root** note the sample plays at, and **Mono** with **Glide** for bass lines and slides.
+- **Piano roll** for each Keys track: click to add a note (drag right to make it longer), drag notes to move them, drag their right edge to resize, click a selected note again to remove it; velocity lane underneath; key and scale highlighting with **Snap to scale**; the other Keys tracks show faintly behind
+- Each Keys track has its **own length and step size** (drums 1 bar, keys 2 or 4 bars...) and all of it switches with the pattern; a strip under the drum grid shows every Keys track in time with the drums
+- **Pads play this track**: while a Keys track is shown, the TempoPAD plays it (Key mode gives you a keyboard layout); arm Rec to record notes with their lengths
 - Swing, live recording from your pads (quantized), pattern switching at the bar line
 - Follows your DAW's transport, or runs on its own
 

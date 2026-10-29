@@ -195,10 +195,53 @@ void StepGrid::paint (Graphics& g)
             if (pad == selPad && step == selStep && vel > 0) { g.setColour (text); g.drawRoundedRectangle (cell.reduced (0.5f), 3.0f, 2.0f); }
         }
     }
+
+    // Keys tracks strip: each track's notes placed in time against the drum steps; click one to open it
+    const int top = laneTop();
+    g.setColour (muted);
+    g.setFont (Font (11.0f, Font::bold));
+    g.drawText ("KEYS TRACKS", 4, top + 6, nameW, laneHeaderH - 6, Justification::centredLeft);
+    const double drumSL = pat.stepLength();
+    const double winStart = page * 16 * drumSL, winEnd = winStart + 16 * drumSL;
+    for (int t = 0; t < Keys::numTracks; ++t)
+    {
+        const int y = top + laneHeaderH + t * laneRowH;
+        const auto& kt = ctx.getProc().keysTracks[t];
+        g.setColour (t % 2 ? panel : panel.brighter (0.025f));
+        g.fillRect (0, y, nameW - 4, laneRowH - 2);
+        g.setColour (KeysUI::trackColour (t));
+        g.fillEllipse (8.0f, (float) y + laneRowH * 0.5f - 4.0f, 8.0f, 8.0f);
+        g.setColour (kt.sourcePad.load() >= 0 ? text : muted);
+        g.setFont (Font (12.0f));
+        g.drawText (kt.name, 24, y, nameW - 30, laneRowH - 2, Justification::centredLeft);
+        g.setColour (Colour (0xff1b1430));
+        g.fillRect ((float) nameW, (float) y, cw * 16.0f, (float) laneRowH - 2.0f);
+        const auto& ln = pat.lanes[t];
+        auto notes = ln.get();
+        if (notes == nullptr) continue;
+        const double sl = ln.stepLength(), loop = jlimit (1, Seq::maxSteps, ln.length.load()) * sl;
+        g.setColour (KeysUI::trackColour (t));
+        for (long long m = (long long) std::floor (winStart / loop); m * loop < winEnd; ++m)
+            for (const auto& n : *notes)
+            {
+                const double s = m * loop + n.step * sl, e = s + n.len * sl;
+                if (e <= winStart || s >= winEnd) continue;
+                const float x0 = nameW + (float) ((jmax (s, winStart) - winStart) / drumSL) * cw;
+                const float x1 = nameW + (float) ((jmin (e, winEnd) - winStart) / drumSL) * cw;
+                const float ny = (float) y + 3.0f + (float) (Keys::highNote - n.pitch) / (Keys::highNote - Keys::lowNote) * (laneRowH - 9.0f);
+                g.fillRoundedRectangle (x0 + 1.0f, ny, jmax (2.0f, x1 - x0 - 2.0f), 3.0f, 1.5f);
+            }
+    }
 }
 
 void StepGrid::mouseDown (const MouseEvent& e)
 {
+    if (e.y >= laneTop() + laneHeaderH)                // the Keys tracks strip: open that track
+    {
+        const int t = (e.y - laneTop() - laneHeaderH) / laneRowH;
+        if (isPositiveAndBelow (t, Keys::numTracks)) owner.selectTrack (t + 1);
+        return;
+    }
     const int r = e.y / rowH;
     if (! isPositiveAndBelow (r, (int) rows.size())) return;
     if (e.x < nameW)
@@ -436,7 +479,11 @@ SequencerPage::SequencerPage (EditorContext& c) : ctx (c), proc (c.getProc())
     recButton.setColour (TextButton::buttonOnColourId, rec);
     recButton.setTooltip ("Live record: hits you play on the TempoPAD go into the pattern, snapped to the nearest step");
     recButton.onClick = [this] { proc.seqRecord = recButton.getToggleState(); };
-    clearButton.onClick = [this] { pattern().clear(); grid.repaint(); padsChanged(); stepChanged(); };
+    clearButton.onClick = [this]
+    {
+        if (auto* l = currentLane()) { l->set (nullptr); roll.selPitch = roll.selStep = -1; roll.repaint(); notePanel.refresh(); velLane.repaint(); }
+        else { pattern().clearDrums(); grid.repaint(); padsChanged(); stepChanged(); }
+    };
 
     for (auto* b : { &captureButton, &fillButton, &undoButton, &redoButton }) { styleButton (*b); addAndMakeVisible (b); }
     captureButton.setTooltip ("Turn what you just played on the pads into the pattern (the last loop's worth), even with Rec off");
@@ -499,13 +546,23 @@ SequencerPage::SequencerPage (EditorContext& c) : ctx (c), proc (c.getProc())
 
     lengthLabel.setText ("Length", dontSendNotification); styleLabel (lengthLabel, 11.0f); addAndMakeVisible (lengthLabel);
     for (int l : { 16, 32, 48, 64 }) lengthBox.addItem (String (l) + " steps", l);
-    lengthBox.onChange = [this] { pattern().length = lengthBox.getSelectedId(); setPage (jmin (grid.page, pattern().length.load() / 16 - 1)); };
+    lengthBox.onChange = [this]
+    {
+        if (auto* l = currentLane()) l->length = lengthBox.getSelectedId();
+        else pattern().length = lengthBox.getSelectedId();
+        setPage (jmin (grid.page, pageCount() - 1));
+    };
     addAndMakeVisible (lengthBox);
 
     resLabel.setText ("Steps", dontSendNotification); styleLabel (resLabel, 11.0f); addAndMakeVisible (resLabel);
     resBox.addItem ("1/4", 1); resBox.addItem ("1/4 triplet", 2); resBox.addItem ("1/8", 3); resBox.addItem ("1/8 triplet", 4);
     resBox.addItem ("1/16", 5); resBox.addItem ("1/16 triplet", 6); resBox.addItem ("1/32", 7);
-    resBox.onChange = [this] { pattern().stepsPer2Beats = resSpb2[jlimit (1, numRes, resBox.getSelectedId()) - 1]; grid.repaint(); };
+    resBox.onChange = [this]
+    {
+        const int v = resSpb2[jlimit (1, numRes, resBox.getSelectedId()) - 1];
+        if (auto* l = currentLane()) l->stepsPer2Beats = v; else pattern().stepsPer2Beats = v;
+        grid.repaint(); roll.repaint();
+    };
     addAndMakeVisible (resBox);
 
     swingLabel.setText ("Swing", dontSendNotification); styleLabel (swingLabel, 11.0f); addAndMakeVisible (swingLabel);
@@ -543,6 +600,74 @@ SequencerPage::SequencerPage (EditorContext& c) : ctx (c), proc (c.getProc())
     viewport.setScrollBarsShown (true, false);
     addAndMakeVisible (viewport);
 
+    // ---- Keys tracks
+    for (int i = 0; i <= Keys::numTracks; ++i)
+    {
+        auto& b = trackButtons[i];
+        styleButton (b);
+        b.setColour (TextButton::buttonOnColourId, (i == 0 ? accent : KeysUI::trackColour (i - 1)).withAlpha (0.85f));
+        b.setColour (TextButton::textColourOnId, Colour (0xff120c1c));
+        b.setTooltip (i == 0 ? String ("The drum pads' step grid") : "A melodic track: one pad's sound played across the keyboard");
+        b.onClick = [this, i] { selectTrack (i); };
+        addAndMakeVisible (b);
+    }
+    soundLabel.setText ("Sound", dontSendNotification); styleLabel (soundLabel, 11.0f); addChildComponent (soundLabel);
+    soundBox.setTooltip ("The pad this track plays, pitched across the keyboard (it keeps that pad's tuning, envelope and filter)");
+    soundBox.onChange = [this]
+    {
+        if (selectedTrack <= 0) return;
+        proc.keysTracks[selectedTrack - 1].sourcePad = soundBox.getSelectedId() - 2;
+        grid.repaint();
+    };
+    addChildComponent (soundBox);
+    rootLabel.setText ("Root", dontSendNotification); styleLabel (rootLabel, 11.0f); addChildComponent (rootLabel);
+    for (int n = 24; n <= 96; ++n) rootBox.addItem (KeysUI::noteName (n), n);
+    rootBox.setTooltip ("The note the sample plays at its own pitch (e.g. C3 for \"Rhodes C3.wav\")");
+    rootBox.onChange = [this] { if (selectedTrack > 0) proc.keysTracks[selectedTrack - 1].root = rootBox.getSelectedId(); };
+    addChildComponent (rootBox);
+    monoToggle.setTooltip ("One note at a time (bass lines, leads)");
+    monoToggle.onClick = [this]
+    {
+        if (selectedTrack > 0) proc.keysTracks[selectedTrack - 1].mono = monoToggle.getToggleState();
+        syncTrackControls();
+    };
+    glideSlider.setSliderStyle (Slider::LinearHorizontal);
+    glideSlider.setRange (0.0, 300.0, 5.0);
+    glideSlider.setTextBoxStyle (Slider::TextBoxRight, false, 64, 20);
+    glideSlider.textFromValueFunction = [] (double v) { return v < 1.0 ? String ("No glide") : "Glide " + String ((int) v) + " ms"; };
+    glideSlider.setColour (Slider::thumbColourId, accent);
+    glideSlider.setColour (Slider::textBoxOutlineColourId, Colours::transparentBlack);
+    glideSlider.setColour (Slider::textBoxTextColourId, text);
+    glideSlider.setTooltip ("Mono only: slide from one note to the next");
+    glideSlider.onValueChange = [this] { if (selectedTrack > 0) proc.keysTracks[selectedTrack - 1].glideMs = (float) glideSlider.getValue(); };
+    addChildComponent (glideSlider);
+    for (int r = 0; r < 12; ++r) scaleRootBox.addItem (MidiMessage::getMidiNoteName (r, true, false, 3), r + 1);
+    for (int s = 0; s < Keys::numScales; ++s) scaleTypeBox.addItem (Keys::scaleName (s), s + 1);
+    scaleRootBox.setTooltip ("Key: highlights its notes in the piano roll");
+    scaleTypeBox.setTooltip ("Scale: highlights its notes; Snap keeps new notes in it");
+    scaleRootBox.onChange = [this] { proc.scaleRoot = scaleRootBox.getSelectedId() - 1; roll.repaint(); };
+    scaleTypeBox.onChange = [this] { proc.scaleType = scaleTypeBox.getSelectedId() - 1; roll.repaint(); };
+    addChildComponent (scaleRootBox);
+    addChildComponent (scaleTypeBox);
+    for (auto* t : { &monoToggle, &snapToggle, &ghostToggle, &padsPlayToggle })
+    {
+        t->setColour (ToggleButton::textColourId, muted);
+        t->setColour (ToggleButton::tickColourId, accent);
+        addChildComponent (t);
+    }
+    snapToggle.setToggleState (true, dontSendNotification);
+    ghostToggle.setToggleState (true, dontSendNotification);
+    padsPlayToggle.setToggleState (true, dontSendNotification);
+    padsPlayToggle.setTooltip ("While this track is shown, the TempoPAD's pads play it (Key mode gives you a keyboard layout). Arm Rec to record.");
+    snapToggle.onClick = [this] { roll.snap = snapToggle.getToggleState(); };
+    ghostToggle.onClick = [this] { roll.ghosts = ghostToggle.getToggleState(); roll.repaint(); };
+    rollViewport.setViewedComponent (&roll, false);
+    rollViewport.setScrollBarsShown (true, false);
+    addChildComponent (rollViewport);
+    addChildComponent (velLane);
+    addChildComponent (notePanel);
+    roll.onChange = [this] { notePanel.refresh(); velLane.repaint(); };
+
     defaultHint = String ("Click an empty step to add it (Shift = accent), click a lit step to select it, click it again to remove it. Drag up/down for velocity. "
                   "Right-click for velocity and ratchets (rolls). Arm Rec and play the TempoPAD while it loops to record. "
                   "Plays with LUNA's transport; Play runs it on its own.");
@@ -553,6 +678,101 @@ SequencerPage::SequencerPage (EditorContext& c) : ctx (c), proc (c.getProc())
 
     syncPatternControls();
     padsChanged();
+    selectTrack (0);
+}
+
+SequencerPage::~SequencerPage() { proc.keysInput = -1; }
+
+KeysLane* SequencerPage::currentLane()
+{
+    return selectedTrack > 0 ? &pattern().lanes[jlimit (0, Keys::numTracks - 1, selectedTrack - 1)] : nullptr;
+}
+
+int SequencerPage::pageCount()
+{
+    const int len = currentLane() != nullptr ? currentLane()->length.load() : pattern().length.load();
+    return jlimit (1, 4, len / 16);
+}
+
+void SequencerPage::rebuildSoundBox()
+{
+    const int keep = soundBox.getSelectedId();
+    soundBox.clear (dontSendNotification);
+    soundBox.addItem ("Pick a sound...", 1);
+    for (int pad : padsByNote())
+    {
+        auto ps = proc.getPad (pad);
+        if (ps->layers.empty()) continue;
+        soundBox.addItem (String (PadLayout::noteForPad (pad)) + "  " + (ps->name.isEmpty() ? String ("Pad") : ps->name), pad + 2);
+    }
+    if (selectedTrack > 0)
+    {
+        const int src = proc.keysTracks[selectedTrack - 1].sourcePad.load();
+        if (src >= 0 && soundBox.indexOfItemId (src + 2) < 0)      // a pad that's been emptied: still show it
+            soundBox.addItem (String (PadLayout::noteForPad (src)) + "  (empty)", src + 2);
+        soundBox.setSelectedId (src + 2, dontSendNotification);
+    }
+    else if (keep > 0) soundBox.setSelectedId (keep, dontSendNotification);
+}
+
+void SequencerPage::syncTrackControls()
+{
+    for (int i = 0; i <= Keys::numTracks; ++i)
+    {
+        trackButtons[i].setButtonText (i == 0 ? String ("Drums") : proc.keysTracks[i - 1].name);
+        trackButtons[i].setToggleState (i == selectedTrack, dontSendNotification);
+    }
+    const bool keys = selectedTrack > 0;
+    for (Component* c : std::initializer_list<Component*> { &soundLabel, &soundBox, &rootLabel, &rootBox, &monoToggle })
+        c->setVisible (keys);
+    if (! keys) { glideSlider.setVisible (false); return; }
+    const auto& kt = proc.keysTracks[selectedTrack - 1];
+    rebuildSoundBox();
+    rootBox.setSelectedId (kt.root.load(), dontSendNotification);
+    monoToggle.setToggleState (kt.mono.load(), dontSendNotification);
+    glideSlider.setValue (kt.glideMs.load(), dontSendNotification);
+    glideSlider.updateText();
+    glideSlider.setVisible (kt.mono.load());
+    scaleRootBox.setSelectedId (proc.scaleRoot.load() + 1, dontSendNotification);
+    scaleTypeBox.setSelectedId (proc.scaleType.load() + 1, dontSendNotification);
+}
+
+void SequencerPage::selectTrack (int t)
+{
+    selectedTrack = jlimit (0, Keys::numTracks, t);
+    const bool keys = selectedTrack > 0;
+    viewport.setVisible (! keys);
+    stepPanel.setVisible (! keys);
+    allPadsToggle.setVisible (! keys);
+    tempoPadToggle.setVisible (! keys);
+    followToggle.setVisible (! keys);
+    for (Component* c : std::initializer_list<Component*> { &rollViewport, &velLane, &notePanel, &scaleRootBox, &scaleTypeBox, &snapToggle, &ghostToggle, &padsPlayToggle })
+        c->setVisible (keys);
+    if (keys)
+    {
+        roll.track = selectedTrack - 1;
+        roll.selPitch = roll.selStep = -1;
+        roll.lastLen = proc.keysTracks[roll.track].mono.load() ? 2 : 4;
+        // scroll to the notes, or around the root if the track is empty
+        int top = proc.keysTracks[roll.track].root.load() + 14;
+        if (auto notes = currentLane()->get()) { top = 0; for (const auto& n : *notes) top = jmax (top, (int) n.pitch + 4); }
+        rollViewport.setViewPosition (0, jlimit (0, roll.preferredHeight(), roll.yForPitch (jmin (Keys::highNote, top))));
+    }
+    syncTrackControls();
+    syncPatternControls();
+    updateHint();
+    resized();
+    notePanel.refresh();
+}
+
+void SequencerPage::updateHint()
+{
+    if (selectedTrack > 0)
+        hint.setText ("Click the grid to add a note (drag right for a longer one), click a note to select it, drag to move it, drag its right edge to resize, "
+                      "click it again to remove it. With \"Pads play this track\" on, the TempoPAD plays it (Key mode = keyboard layout); arm Rec to record.",
+                      dontSendNotification);
+    else
+        ctrlModeChanged();
 }
 
 PatternData& SequencerPage::pattern() { return proc.patterns[jlimit (0, Seq::numPatterns - 1, proc.currentPattern.load())]; }
@@ -560,27 +780,30 @@ PatternData& SequencerPage::pattern() { return proc.patterns[jlimit (0, Seq::num
 void SequencerPage::syncPatternControls()
 {
     auto& pat = pattern();
-    lengthBox.setSelectedId (pat.length.load(), dontSendNotification);
+    auto* ln = currentLane();
+    lengthBox.setSelectedId (ln != nullptr ? ln->length.load() : pat.length.load(), dontSendNotification);
+    const int s2 = ln != nullptr ? ln->stepsPer2Beats.load() : pat.stepsPer2Beats.load();
     int resId = 5;
-    for (int i = 0; i < numRes; ++i) if (resSpb2[i] == pat.stepsPer2Beats.load()) resId = i + 1;
+    for (int i = 0; i < numRes; ++i) if (resSpb2[i] == s2) resId = i + 1;
     resBox.setSelectedId (resId, dontSendNotification);
     swingSlider.setValue (proc.swing.load(), dontSendNotification);
     bpmSlider.setValue (proc.internalBpm.load(), dontSendNotification);
     recButton.setToggleState (proc.seqRecord.load(), dontSendNotification);
-    setPage (jmin (grid.page, jmax (0, pat.length.load() / 16 - 1)));
+    setPage (jmin (grid.page, pageCount() - 1));
     padsChanged();
+    roll.repaint(); velLane.repaint(); notePanel.refresh();
 }
 
 void SequencerPage::setPage (int p)
 {
-    grid.page = jlimit (0, 3, p);
-    const int pages = jmax (1, pattern().length.load() / 16);
+    grid.page = roll.page = jlimit (0, 3, p);
+    const int pages = pageCount();
     for (int i = 0; i < 4; ++i)
     {
         pageButtons[i].setVisible (pages > 1 && i < pages);
         pageButtons[i].setToggleState (i == grid.page, dontSendNotification);
     }
-    grid.repaint();
+    grid.repaint(); roll.repaint(); velLane.repaint();
 }
 
 void SequencerPage::padsChanged()
@@ -590,8 +813,11 @@ void SequencerPage::padsChanged()
     for (int pad : padsByNote())
         if (allPadsToggle.getToggleState() || ! proc.getPad (pad)->layers.empty() || pat.padHasSteps (pad))
             grid.rows.push_back (pad);
-    grid.setSize (jmax (100, viewport.getWidth() - viewport.getScrollBarThickness()), jmax (1, (int) grid.rows.size() * StepGrid::rowH));
+    grid.setSize (jmax (100, viewport.getWidth() - viewport.getScrollBarThickness()),
+                  (int) grid.rows.size() * StepGrid::rowH + StepGrid::laneHeaderH + Keys::numTracks * StepGrid::laneRowH);
     grid.repaint();
+    roll.setSize (jmax (100, rollViewport.getWidth() - rollViewport.getScrollBarThickness()), roll.preferredHeight());
+    if (selectedTrack > 0) rebuildSoundBox();
 }
 
 void SequencerPage::ctrlModeChanged()
@@ -602,6 +828,7 @@ void SequencerPage::ctrlModeChanged()
         const int m = proc.ctrlMode.load();
         if (m == PadRomplerProcessor::ctrlSteps)
         {
+            if (selectedTrack != 0) { selectTrack (0); return; }
             auto ps = proc.getPad (ctx.getSelectedPad());
             h = "TempoPAD User mode: each pad turns a step on or off for " + (ps->name.isEmpty() ? String ("the selected pad") : ps->name)
               + " (top-left pad = step 1, reading across like a page). Switch to Drum mode, hit another pad, and come back to program that one.";
@@ -610,7 +837,7 @@ void SequencerPage::ctrlModeChanged()
             h = "TempoPAD Easy mode: the top row of pads picks patterns 1-8 (it changes at the end of the bar while playing). "
                 "The other pads play as normal. Switch to Drum mode to go back.";
     }
-    hint.setText (h, dontSendNotification);
+    if (selectedTrack == 0) hint.setText (h, dontSendNotification);
     grid.repaint();
 }
 
@@ -638,6 +865,19 @@ void SequencerPage::stepChanged()
 
 void SequencerPage::tick()
 {
+    proc.keysInput = (isShowing() && selectedTrack > 0 && padsPlayToggle.getToggleState()) ? selectedTrack - 1 : -1;
+    proc.drainKeyRecordings();
+    if (proc.keysRecorded.load() != lastKeysRecorded) { lastKeysRecorded = proc.keysRecorded.load(); roll.repaint(); velLane.repaint(); grid.repaint(); }
+    if (selectedTrack > 0)
+    {
+        const int ks = proc.keysStep[selectedTrack - 1].load();
+        if (ks != lastKeysStep)
+        {
+            lastKeysStep = ks;
+            if (ks >= 0 && ks / 16 != roll.page) setPage (ks / 16);    // follow the playhead
+            roll.repaint();
+        }
+    }
     undoButton.setEnabled (history.canUndo());
     redoButton.setEnabled (history.canRedo());
     fillButton.setToggleState (proc.fillOn.load(), dontSendNotification);
@@ -669,13 +909,13 @@ void SequencerPage::tick()
         const bool on = (i == cur) || (i == queued && (blink / 8) % 2 == 0);
         patButtons[i].setToggleState (on, dontSendNotification);
     }
-    if (cur != lastPattern) { lastPattern = cur; syncPatternControls(); }
+    if (cur != lastPattern) { lastPattern = cur; syncPatternControls(); roll.selPitch = roll.selStep = -1; notePanel.refresh(); }
 
     const int step = proc.playStep.load();
     if (step != lastStep)
     {
         lastStep = step;
-        if (step >= 0 && followToggle.getToggleState() && step / 16 != grid.page) setPage (step / 16);
+        if (step >= 0 && selectedTrack == 0 && followToggle.getToggleState() && step / 16 != grid.page) setPage (step / 16);
         grid.repaint();
     }
     if (proc.seqRecord.load() && (host || internal)) grid.repaint();   // show live-recorded hits as they land
@@ -690,7 +930,7 @@ void SequencerPage::paint (Graphics& g)
 void SequencerPage::resized()
 {
     auto area = getLocalBounds();
-    barArea = area.removeFromTop (130);
+    barArea = area.removeFromTop (168);
     auto b = barArea.reduced (12, 10);
 
     auto row1 = b.removeFromTop (30);
@@ -723,18 +963,44 @@ void SequencerPage::resized()
     redoButton.setBounds (row3.removeFromLeft (60)); row3.removeFromLeft (14);
     statusLabel.setBounds (row3);
 
+    b.removeFromTop (10);
+    auto row4 = b.removeFromTop (28);
+    for (int i = 0; i <= Keys::numTracks; ++i) { trackButtons[i].setBounds (row4.removeFromLeft (i == 0 ? 72 : 84)); row4.removeFromLeft (4); }
+    row4.removeFromLeft (12);
+    soundLabel.setBounds (row4.removeFromLeft (40));
+    soundBox.setBounds (row4.removeFromLeft (170)); row4.removeFromLeft (10);
+    rootLabel.setBounds (row4.removeFromLeft (32));
+    rootBox.setBounds (row4.removeFromLeft (66)); row4.removeFromLeft (10);
+    monoToggle.setBounds (row4.removeFromLeft (62));
+    glideSlider.setBounds (row4.removeFromLeft (150));
+
     area.removeFromTop (8);
     auto pagesRow = area.removeFromTop (26);
-    tempoPadToggle.setBounds (pagesRow.removeFromRight (140));
-    allPadsToggle.setBounds (pagesRow.removeFromRight (130));
-    followToggle.setBounds (pagesRow.removeFromRight (140));
-    pagesRow.removeFromLeft (StepGrid::nameW);
+    {
+        auto pr = pagesRow;
+        tempoPadToggle.setBounds (pr.removeFromRight (140));
+        allPadsToggle.setBounds (pr.removeFromRight (130));
+        followToggle.setBounds (pr.removeFromRight (140));
+        pr = pagesRow;
+        padsPlayToggle.setBounds (pr.removeFromRight (162));
+        ghostToggle.setBounds (pr.removeFromRight (140));
+        snapToggle.setBounds (pr.removeFromRight (112));
+        scaleTypeBox.setBounds (pr.removeFromRight (136).reduced (0, 1)); pr.removeFromRight (4);
+        scaleRootBox.setBounds (pr.removeFromRight (58).reduced (0, 1));
+    }
+    pagesRow.removeFromLeft (selectedTrack > 0 ? PianoRoll::keyW : StepGrid::nameW);
     for (auto& pb : pageButtons) { pb.setBounds (pagesRow.removeFromLeft (70)); pagesRow.removeFromLeft (4); }
     area.removeFromTop (6);
     hint.setBounds (area.removeFromBottom (34));
     area.removeFromBottom (4);
-    stepPanel.setBounds (area.removeFromRight (210));
+    auto side = area.removeFromRight (210);
+    stepPanel.setBounds (side);
+    notePanel.setBounds (side);
     area.removeFromRight (10);
     viewport.setBounds (area);
+    auto keysArea = area;
+    velLane.setBounds (keysArea.removeFromBottom (58));
+    keysArea.removeFromBottom (6);
+    rollViewport.setBounds (keysArea);
     padsChanged();
 }

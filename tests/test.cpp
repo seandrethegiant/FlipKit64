@@ -185,6 +185,105 @@ int main (int, char** argv)
         q.setPlayHead (nullptr);
     }
 
+    {   // ---------------- Keys tracks
+        // render until the playhead reaches 'to', returning the left channel
+        auto renderTo = [] (PadRomplerProcessor& p, FakePlayHead* ph, double to, MidiBuffer* first = nullptr)
+        {
+            std::vector<float> out; AudioBuffer<float> b (2, BS); MidiBuffer m;
+            bool firstDone = false;
+            while (ph == nullptr ? out.size() < (size_t) (to * SR) : ph->ppq < to)
+            {
+                if (first != nullptr && ! firstDone) { m = *first; firstDone = true; }
+                p.processBlock (b, m); m.clear();
+                if (ph) ph->ppq += BS * ph->bpm / 60.0 / SR;
+                for (int s = 0; s < BS; ++s) out.push_back (b.getSample (0, s));
+            }
+            return out;
+        };
+        auto rms = [] (const std::vector<float>& x, size_t from, size_t to)
+        {
+            double sum = 0; to = jmin (to, x.size());
+            for (size_t i = from; i < to; ++i) sum += x[i] * x[i];
+            return to > from ? std::sqrt (sum / (double) (to - from)) : 0.0;
+        };
+        auto freq = [] (const std::vector<float>& x, size_t from, size_t to)    // rising zero crossings per second
+        {
+            int n = 0; to = jmin (to, x.size());
+            for (size_t i = from + 1; i < to; ++i) if (x[i - 1] < 0.0f && x[i] >= 0.0f) ++n;
+            return n / ((double) (to - from) / SR);
+        };
+        const size_t perBeat = (size_t) (SR * 60.0 / 120.0);
+
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        q.assignRegion (A, makeTone (3.0, 440.0f), 0, 1, "keys");
+        q.keysTracks[0].sourcePad = A; q.keysTracks[0].root = 60; q.keysTracks[0].mono = false;
+        auto& lane = q.patterns[0].lanes[0];                           // 1/8 steps: step 2 = beat 1.0
+        lane.set (q.makeNotes ({ { 72, 2, 2, 110 } }));                // C4, an octave up, 2 steps = 1 beat
+        FakePlayHead ph; q.setPlayHead (&ph);
+        auto x = renderTo (q, &ph, 2.6);
+        check (rms (x, 0, (size_t) (0.95 * perBeat)) < 1e-4 && rms (x, (size_t) (1.05 * perBeat), (size_t) (1.9 * perBeat)) > 0.05,
+               "Keys: a note plays on its step");
+        const double f = freq (x, (size_t) (1.1 * perBeat), (size_t) (1.9 * perBeat));
+        check (std::abs (f - 880.0) < 15.0, ("Keys: an octave above the root plays an octave up (" + String (f, 0) + " Hz)").toRawUTF8());
+        check (rms (x, (size_t) (2.15 * perBeat), (size_t) (2.6 * perBeat)) < 1e-3, "Keys: the note stops after its length");
+
+        ph.playing = false; renderTo (q, &ph, 0.0); renderTo (q, nullptr, 0.1);
+        q.keysTracks[1].sourcePad = A; q.keysTracks[1].root = 60;     // Bass: mono with glide by default
+        q.patterns[0].lanes[1].set (q.makeNotes ({ { 60, 0, 2, 110 }, { 67, 2, 2, 110 } }));
+        lane.set (nullptr);
+        ph.ppq = 0.0; ph.playing = true;
+        auto y = renderTo (q, &ph, 1.95);
+        const double f1 = freq (y, (size_t) (0.1 * perBeat), (size_t) (0.9 * perBeat));
+        const double f2 = freq (y, (size_t) (1.3 * perBeat), (size_t) (1.9 * perBeat));
+        const double mid = rms (y, (size_t) (0.98 * perBeat), (size_t) (1.02 * perBeat));
+        check (std::abs (f1 - 440.0) < 10.0 && std::abs (f2 - 659.3) < 12.0 && mid > 0.05,
+               ("Bass: glides from C to G without a gap (" + String (f1, 0) + " -> " + String (f2, 0) + " Hz)").toRawUTF8());
+
+        ph.playing = false; renderTo (q, &ph, 0.0); renderTo (q, nullptr, 0.2);
+        q.patterns[0].lanes[1].set (nullptr);
+        q.keysInput = 0;                                               // pads play Keys 1
+        MidiBuffer on; on.addEvent (MidiMessage::noteOn (1, 64, 1.0f), 0);
+        auto z = renderTo (q, nullptr, 0.4, &on);
+        const double fz = freq (z, (size_t) (0.05 * SR), (size_t) (0.35 * SR));
+        MidiBuffer off; off.addEvent (MidiMessage::noteOff (1, 64), 0);
+        auto z2 = renderTo (q, nullptr, 0.3, &off);
+        check (rms (z, (size_t) (0.05 * SR), (size_t) (0.35 * SR)) > 0.05 && std::abs (fz - 554.4) < 12.0 && rms (z2, (size_t) (0.1 * SR), (size_t) (0.3 * SR)) < 1e-3,
+               ("Keys from the pads: a held note sounds at its pitch and stops on release (" + String (fz, 0) + " Hz)").toRawUTF8());
+
+        q.seqRecord = true; ph.ppq = 0.0; ph.playing = true;
+        renderTo (q, &ph, 0.5);
+        MidiBuffer on2; on2.addEvent (MidiMessage::noteOn (1, 67, 0.8f), 0);
+        renderTo (q, &ph, 1.5, &on2);
+        MidiBuffer off2; off2.addEvent (MidiMessage::noteOff (1, 67), 0);
+        renderTo (q, &ph, 1.6, &off2);
+        q.drainKeyRecordings();
+        auto rec = lane.get();
+        check (rec != nullptr && rec->size() == 1 && (*rec)[0].pitch == 67 && (*rec)[0].step == 1 && (*rec)[0].len == 2 && (*rec)[0].vel > 90 && (*rec)[0].vel < 110,
+               "Keys recording: a held note lands on its step with its length");
+        q.seqRecord = false; q.keysInput = -1;
+        q.setPlayHead (nullptr);
+
+        lane.length = 32; lane.stepsPer2Beats = 2;
+        q.keysTracks[2].name = "Strings"; q.keysTracks[2].root = 48; q.scaleType = 2; q.scaleRoot = 9;
+        MemoryBlock mb; q.getStateInformation (mb);
+        PadRomplerProcessor r; r.setStateInformation (mb.getData(), (int) mb.getSize());
+        auto rn = r.patterns[0].lanes[0].get();
+        check (rn != nullptr && rn->size() == 1 && (*rn)[0].pitch == 67 && (*rn)[0].len == 2 && r.patterns[0].lanes[0].length.load() == 32
+               && r.patterns[0].lanes[0].stepsPer2Beats.load() == 2 && r.keysTracks[0].sourcePad.load() == A && r.keysTracks[1].mono.load()
+               && r.keysTracks[2].name == "Strings" && r.keysTracks[2].root.load() == 48 && r.scaleType.load() == 2 && r.scaleRoot.load() == 9,
+               "state keeps Keys notes, lane lengths, track settings and the scale");
+
+        PatternHistory hist (q);
+        lane.set (q.makeNotes ({ { 60, 0, 4, 100 } }));
+        for (int i = 0; i < 6; ++i) hist.tick();
+        Thread::sleep (450);
+        for (int i = 0; i < 6; ++i) hist.tick();
+        hist.undo();
+        auto un = lane.get();
+        check (un != nullptr && un->size() == 1 && (*un)[0].pitch == 67, "undo covers Keys notes");
+        check (Keys::inScale (2, 9, 69) && Keys::inScale (2, 9, 72) && ! Keys::inScale (2, 9, 70), "scales: A minor has A and C, not A#");
+    }
+
     {   // ---------------- chance, conditions, fills, micro-timing
         PadRomplerProcessor q; q.prepareToPlay (SR, BS);
         q.assignRegion (A, makeTone (0.01, 1000.0f), 0, 1, "a");
@@ -449,6 +548,33 @@ int main (int, char** argv)
             auto img = ed->createComponentSnapshot (ed->getLocalBounds());
             const File snapFile { String (snap) }; FileOutputStream fo { snapFile }; fo.setPosition (0); fo.truncate();
             PNGImageFormat().writeImageToStream (img, fo);
+            if (auto* snap2 = std::getenv ("FLIPKIT_SNAP2"))
+            {
+                const int keysPad = padOfNote (44), bassPad = padOfNote (45);
+                q.assignRegion (keysPad, makeTone (1.0, 262.0f), 0, 1, "Rhodes C3");
+                q.assignRegion (bassPad, makeTone (1.0, 65.0f), 0, 1, "808 Sub C1");
+                q.keysTracks[0].sourcePad = keysPad; q.keysTracks[1].sourcePad = bassPad; q.keysTracks[1].root = 36;
+                q.scaleRoot = 0; q.scaleType = 2;
+                q.patterns[0].lanes[0].set (q.makeNotes ({ { 60, 0, 6, 96 }, { 63, 0, 6, 88 }, { 67, 0, 6, 84 }, { 70, 0, 6, 80 },
+                                                            { 56, 8, 6, 92 }, { 60, 8, 6, 86 }, { 63, 8, 6, 82 }, { 67, 8, 6, 78 } }));
+                q.patterns[0].lanes[1].set (q.makeNotes ({ { 48, 0, 3, 120 }, { 48, 3, 1, 90 }, { 51, 6, 2, 104 }, { 56, 8, 4, 118 }, { 55, 13, 2, 100 } }));
+                for (auto* c : ed->getChildren())
+                    if (auto* seqPage = dynamic_cast<SequencerPage*> (c))
+                    {
+                        seqPage->padsChanged();
+                        seqPage->repaint();
+                        MessageManager::getInstance()->runDispatchLoopUntil (100);
+                        auto img1 = ed->createComponentSnapshot (ed->getLocalBounds());
+                        const File f1 { String (snap2) + "-drums.png" }; f1.deleteFile(); FileOutputStream o1 { f1 };
+                        PNGImageFormat().writeImageToStream (img1, o1);
+                        seqPage->selectTrack (2);
+                        MessageManager::getInstance()->runDispatchLoopUntil (150);
+                        auto img2 = ed->createComponentSnapshot (ed->getLocalBounds());
+                        const File f2 { String (snap2) + "-bass.png" }; f2.deleteFile(); FileOutputStream o2 { f2 };
+                        PNGImageFormat().writeImageToStream (img2, o2);
+                        seqPage->selectTrack (0);
+                    }
+            }
         }
         auto* pe = dynamic_cast<PadRomplerEditor*> (ed.get());
         check (start == "pads" && inSteps == "seq" && pe != nullptr && pe->getSelectedPad() == padOfNote (45)

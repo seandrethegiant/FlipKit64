@@ -1,5 +1,6 @@
 #pragma once
 #include "Common.h"
+#include "KeysRoll.h"
 
 class SequencerPage;
 
@@ -46,6 +47,8 @@ public:
     int page = 0;
     int selPad = -1, selStep = -1;               // the step the panel edits
     static constexpr int rowH = 26, nameW = 170;
+    static constexpr int laneHeaderH = 24, laneRowH = 20;    // the Keys tracks strip under the drums
+    int laneTop() const { return (int) rows.size() * rowH; }
 
 private:
     EditorContext& ctx;
@@ -80,6 +83,7 @@ class SequencerPage : public juce::Component
 {
 public:
     explicit SequencerPage (EditorContext&);
+    ~SequencerPage() override;
     void paint (juce::Graphics&) override;
     void resized() override;
     void tick();
@@ -87,13 +91,19 @@ public:
     PatternData& pattern();
     int visiblePage() const { return grid.page; }
     void ctrlModeChanged();                // the TempoPAD switched modes (hint text)
-    void historyTick() { history.tick(); }  // always, even while this page is hidden
+    void historyTick()                     // always, even while this page is hidden
+    {
+        history.tick();
+        if (! isShowing()) proc.keysInput = -1;   // pads play drums unless a Keys track is on screen
+    }
     void undo();
     void redo();
     void stepChanged();                    // the grid's selection or a step's settings changed
     StepGrid& getGrid() { return grid; }
     PadRomplerProcessor& getProc() { return proc; }
     EditorContext& getCtx() { return ctx; }
+    void selectTrack (int t);              // 0 = drums, 1..4 = Keys tracks
+    int getSelectedTrack() const { return selectedTrack; }
 
 private:
     EditorContext& ctx;
@@ -124,4 +134,24 @@ private:
 
     void syncPatternControls();
     void setPage (int p);
+
+    // Keys tracks
+    PianoRoll roll { *this };
+    juce::Viewport rollViewport;
+    VelocityLane velLane { roll };
+    NotePanel notePanel { *this, roll };
+    juce::TextButton trackButtons[1 + Keys::numTracks];
+    juce::Label soundLabel, rootLabel;
+    juce::ComboBox soundBox, rootBox, scaleRootBox, scaleTypeBox;
+    juce::ToggleButton monoToggle { "Mono" }, snapToggle { "Snap to scale" }, ghostToggle { "Show other tracks" },
+                       padsPlayToggle { "Pads play this track" };
+    juce::Slider glideSlider;
+    int selectedTrack = 0;
+    juce::uint32 lastKeysRecorded = 0;
+    int lastKeysStep = -2;
+    KeysLane* currentLane();               // nullptr while the drums are shown
+    int pageCount();
+    void syncTrackControls();
+    void rebuildSoundBox();
+    void updateHint();
 };
