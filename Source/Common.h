@@ -62,6 +62,7 @@ struct EditorContext
     virtual void dropFiles (int padIndex, const juce::Array<juce::File>& files) = 0;
     virtual void openInSampler (const juce::File& file) = 0;
     virtual void tempoPadModesChanged (bool) {}
+    virtual void clearAllRequested() {}
     static constexpr const char* dragId = "PadRomplerFiles";
 };
 

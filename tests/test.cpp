@@ -185,6 +185,76 @@ int main (int, char** argv)
         q.setPlayHead (nullptr);
     }
 
+    {   // ---------------- pad play modes, Stop and Clear all
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        q.assignRegion (A, makeTone (3.0, 440.0f), 0, 1, "long");
+        auto send = [&] (const MidiMessage& m) { AudioBuffer<float> b (2, BS); MidiBuffer mb; mb.addEvent (m, 0); q.processBlock (b, mb); };
+        auto level = [&] (double seconds) { return run (q, (int) (seconds * SR / BS)); };
+        auto setPlay = [&] (PlayMode m) { q.updatePad (A, [m] (PadState& p) { p.play = m; }); };
+
+        send (MidiMessage::noteOn (1, 36, 1.0f));
+        level (0.1);
+        send (MidiMessage::noteOff (1, 36));
+        level (0.1);
+        check (level (0.2) > 0.05, "one-shot: keeps playing after the pad is let go");
+        q.stopAllSounds(); level (0.1);
+        check (level (0.2) < 1e-4, "Stop sounds: silences a long one-shot even while stopped");
+
+        setPlay (PlayMode::Hold);
+        send (MidiMessage::noteOn (1, 36, 1.0f));
+        const float holding = level (0.3);
+        send (MidiMessage::noteOff (1, 36));
+        level (0.1);
+        check (holding > 0.05 && level (0.2) < 1e-4, "Hold: plays while held, stops when let go");
+
+        setPlay (PlayMode::Toggle);
+        send (MidiMessage::noteOn (1, 36, 1.0f)); send (MidiMessage::noteOff (1, 36));
+        const float on1 = level (0.3);
+        send (MidiMessage::noteOn (1, 36, 1.0f)); send (MidiMessage::noteOff (1, 36));
+        level (0.1);
+        const float off1 = level (0.2);
+        send (MidiMessage::noteOn (1, 36, 1.0f));
+        check (on1 > 0.05 && off1 < 1e-4 && level (0.2) > 0.05, "Toggle: first press starts, second stops, third starts again");
+        q.stopAllSounds(); level (0.1);
+
+        setPlay (PlayMode::Hold);                                      // from the sequencer a Hold pad lasts one step
+        q.patterns[0].setStep (A, 0, 110);
+        FakePlayHead ph; q.setPlayHead (&ph);
+        run (q, (int) (0.1 * SR / BS), -1, 1, &ph);
+        const float stepOn = run (q, 1, -1, 1, &ph);
+        while (ph.ppq < 0.45) run (q, 1, -1, 1, &ph);
+        check (stepOn > 0.05 && run (q, (int) (0.1 * SR / BS), -1, 1, &ph) < 1e-4, "Hold: a sequenced step lasts one step");
+        q.patterns[0].clear();
+
+        setPlay (PlayMode::OneShot);
+        send (MidiMessage::noteOn (1, 36, 1.0f));
+        run (q, 4, -1, 1, &ph);
+        ph.playing = false;                                            // LUNA (or Play) stops
+        run (q, (int) (0.1 * SR / BS), -1, 1, &ph);
+        check (run (q, (int) (0.2 * SR / BS), -1, 1, &ph) < 1e-4, "Stop: stopping the transport fades out what's still playing");
+        q.setPlayHead (nullptr);
+
+        send (MidiMessage::noteOn (1, 36, 1.0f)); level (0.05);
+        const uint8_t d[] = { 0x7F, 0x7F, 0x06, 0x01 };
+        send (MidiMessage::createSysExMessage (d, 4)); level (0.1);
+        check (level (0.2) < 1e-4, "TempoPAD Stop (MMC) silences everything");
+
+        setPlay (PlayMode::Toggle);
+        MemoryBlock mb; q.getStateInformation (mb);
+        PadRomplerProcessor r; r.setStateInformation (mb.getData(), (int) mb.getSize());
+        check (r.getPad (A)->play == PlayMode::Toggle, "state keeps each pad's play mode");
+
+        q.patterns[1].setStep (B, 3, 100); q.keysTracks[0].sourcePad = A; q.patterns[0].lanes[0].set (q.makeNotes ({ { 60, 0, 2, 100 } }));
+        q.clearAllPads();
+        check (q.getPad (A)->layers.empty() && q.patterns[1].vel[B][3].load() == 100 && q.patterns[0].lanes[0].get() != nullptr,
+               "Clear all pads: empties every pad, keeps the patterns");
+        q.assignRegion (A, makeTone (0.1, 440.0f), 0, 1, "x");
+        const auto loads = q.kitLoads.load();
+        q.newKit();
+        check (q.getPad (A)->layers.empty() && q.patterns[1].vel[B][3].load() == 0 && q.patterns[0].lanes[0].get() == nullptr
+               && q.keysTracks[0].sourcePad.load() == -1 && q.kitLoads.load() == loads + 1, "New kit: clears pads, patterns and Keys tracks");
+    }
+
     {   // ---------------- Keys tracks
         // render until the playhead reaches 'to', returning the left channel
         auto renderTo = [] (PadRomplerProcessor& p, FakePlayHead* ph, double to, MidiBuffer* first = nullptr)

@@ -1,12 +1,12 @@
 cmake_minimum_required(VERSION 3.22)
-project(FlipKit64 VERSION 0.9.6)
+project(FlipKit64 VERSION 0.9.7)
 
 # Path to JUCE 7 (tested with 7.0.12). Default: a JUCE folder next to this one.
 set(JUCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../JUCE" CACHE PATH "Path to the JUCE source tree")
 add_subdirectory(${JUCE_DIR} ${CMAKE_BINARY_DIR}/JUCE)
 
 juce_add_plugin(FlipKit64
-    VERSION 0.9.6
+    VERSION 0.9.7
     COMPANY_NAME "seandrethegiant"
     BUNDLE_ID com.seandrethegiant.flipkit64
     PRODUCT_NAME "FlipKit64"
@@ -35,7 +35,7 @@ target_sources(FlipKit64 PRIVATE
 target_compile_features(FlipKit64 PRIVATE cxx_std_17)
 
 target_compile_definitions(FlipKit64 PUBLIC
-    FLIPKIT_VERSION_LABEL="0.9.6 beta"
+    FLIPKIT_VERSION_LABEL="0.9.7 beta"
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
@@ -83,7 +83,7 @@ option(PADROMPLER_TESTS "Build offline audio tests" OFF)
 if (PADROMPLER_TESTS)
     juce_add_console_app(rompler_test)
     target_sources(rompler_test PRIVATE tests/test.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp Source/SamplerPage.cpp Source/SequencerPage.cpp Source/KeysRoll.cpp Source/Network.cpp Source/NetBrowser.cpp Source/PreviewStrip.cpp)
-    target_compile_definitions(rompler_test PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_USE_FLAC=1 JUCE_USE_OGGVORBIS=1 JUCE_USE_MP3AUDIOFORMAT=1 JucePlugin_Name="FlipKit64" FLIPKIT_VERSION_LABEL="0.9.6 beta" FLIPKIT_DEV=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+    target_compile_definitions(rompler_test PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_USE_FLAC=1 JUCE_USE_OGGVORBIS=1 JUCE_USE_MP3AUDIOFORMAT=1 JucePlugin_Name="FlipKit64" FLIPKIT_VERSION_LABEL="0.9.7 beta" FLIPKIT_DEV=1 JUCE_MODAL_LOOPS_PERMITTED=1)
     target_link_libraries(rompler_test PRIVATE juce::juce_audio_utils juce::juce_audio_formats juce::juce_recommended_config_flags)
     if (FLIPKIT_NETWORK)
         target_include_directories(rompler_test PRIVATE ${libsmb2_SOURCE_DIR}/include)

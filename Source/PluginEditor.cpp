@@ -72,8 +72,10 @@ void PadButton::mouseDown (const MouseEvent& e)
     ctx.selectPad (index);
     // click lower on the pad = softer hit, so velocity layers can be auditioned
     const float vel = jlimit (0.05f, 1.0f, 1.0f - (float) e.y / (float) jmax (1, getHeight()) * 0.95f);
-    ctx.getProc().triggerPad (index, vel);
+    ctx.getProc().triggerPad (index, vel, true);       // a Hold pad plays until the mouse is let go
 }
+
+void PadButton::mouseUp (const MouseEvent&) { ctx.getProc().releasePad (index); }
 
 void PadButton::filesDropped (const StringArray& files, int, int)
 {
@@ -153,6 +155,20 @@ PadsPage::PadsPage (EditorContext& c) : ctx (c), proc (c.getProc())
     modeBox.onChange = [this] { if (refreshing) return; const auto m = (LayerMode) (modeBox.getSelectedId() - 1);
                                 proc.updatePad (ctx.getSelectedPad(), [m] (PadState& p) { p.mode = m; }); };
     addAndMakeVisible (modeBox);
+    playLabel.setText ("Play", dontSendNotification); styleLabel (playLabel, 11.0f); addAndMakeVisible (playLabel);
+    playBox.addItem ("One-shot (plays to the end)", 1);
+    playBox.addItem ("Hold (plays while held)", 2);
+    playBox.addItem ("Toggle (press again to stop)", 3);
+    playBox.setTooltip ("One-shot for drum hits. Hold: plays only while you hold the pad (one step from the sequencer). "
+                        "Toggle: one press starts it, the next stops it - good for long loops and records.");
+    playBox.onChange = [this] { if (refreshing) return; const auto m = (PlayMode) (playBox.getSelectedId() - 1);
+                                proc.updatePad (ctx.getSelectedPad(), [m] (PadState& p) { p.play = m; }); };
+    addAndMakeVisible (playBox);
+    for (auto* b : { &stopAllButton, &clearAllButton }) { styleButton (*b); addAndMakeVisible (b); }
+    stopAllButton.setTooltip ("Stop every sound that's still playing (Esc)");
+    stopAllButton.onClick = [this] { proc.stopAllSounds(); };
+    clearAllButton.setTooltip ("Clear all the pads, or start a new kit (you can save first)");
+    clearAllButton.onClick = [this] { ctx.clearAllRequested(); };
     chokeBox.addItem ("Off", 1);
     for (int i = 1; i <= 8; ++i) chokeBox.addItem ("Group " + String (i), i + 1);
     chokeBox.setTooltip ("Pads in the same choke group cut each other off (e.g. closed hat stops open hat)");
@@ -246,6 +262,7 @@ void PadsPage::refreshPanel()
     nameLabel.setText (pad->name.isEmpty() ? String ("(empty)") : pad->name, dontSendNotification);
     modeBox.setSelectedId ((int) pad->mode + 1, dontSendNotification);
     chokeBox.setSelectedId (pad->choke + 1, dontSendNotification);
+    playBox.setSelectedId ((int) pad->play + 1, dontSendNotification);
     level.slider.setValue (Decibels::gainToDecibels (pad->gain, -36.0f), dontSendNotification);
     pan.slider.setValue (pad->pan, dontSendNotification);
     tune.slider.setValue (pad->tune, dontSendNotification);
@@ -294,7 +311,12 @@ void PadsPage::resized()
         b->setBounds (Rectangle<float> (gridArea.getX() + b->col * cell, gridArea.getY() + b->row * cell, cell, cell).toNearestInt());
 
     auto pr = panelArea.reduced (12);
-    pr.removeFromTop (20);
+    {
+        auto hdr = pr.removeFromTop (20);
+        clearAllButton.setBounds (hdr.removeFromRight (86));
+        hdr.removeFromRight (6);
+        stopAllButton.setBounds (hdr.removeFromRight (92));
+    }
     padTitle.setBounds (pr.removeFromTop (22));
     pr.removeFromTop (4);
     nameLabel.setBounds (pr.removeFromTop (24));
@@ -307,6 +329,10 @@ void PadsPage::resized()
         modeBox.setBounds (row.removeFromLeft (row.getWidth() / 2 - 4));
         row.removeFromLeft (8);
         chokeBox.setBounds (row);
+        pr.removeFromTop (6);
+        row = pr.removeFromTop (24);
+        playLabel.setBounds (row.removeFromLeft (36));
+        playBox.setBounds (row);
     }
     pr.removeFromTop (8);
     Knob* rows[3][4] = { { &level, &pan, &tune, &fine }, { &start, &end, &attack, &decay }, { &cutoff, &reso, nullptr, nullptr } };
@@ -462,12 +488,7 @@ PadRomplerEditor::PadRomplerEditor (PadRomplerProcessor& p)
     supportLink.setFont (Font (12.0f, Font::bold), false, Justification::centredRight);
     supportLink.setTooltip ("FlipKit64 is free - tips on Ko-fi keep it going");
     addAndMakeVisible (supportLink);
-    saveKitButton.onClick = [this]
-    {
-        chooser = std::make_unique<FileChooser> ("Save kit", proc.browserRoot.getChildFile ("My Kit.flipkit"), "*.flipkit");
-        chooser->launchAsync (FileBrowserComponent::saveMode | FileBrowserComponent::warnAboutOverwriting,
-                              [this] (const FileChooser& fc) { auto f = fc.getResult(); if (f != File()) proc.saveKit (f.withFileExtension ("flipkit")); });
-    };
+    saveKitButton.onClick = [this] { saveKitAs (nullptr); };
     loadKitButton.onClick = [this]
     {
         chooser = std::make_unique<FileChooser> ("Load kit", proc.browserRoot, "*.flipkit;*.padkit");
@@ -679,6 +700,55 @@ void PadRomplerEditor::fileDoubleClicked (const File& f)
     else dropFiles (selectedPad, { f });                  // otherwise: put it on the selected pad
 }
 
+void PadRomplerEditor::saveKitAs (std::function<void (bool)> then)
+{
+    chooser = std::make_unique<FileChooser> ("Save kit", proc.browserRoot.getChildFile ("My Kit.flipkit"), "*.flipkit");
+    chooser->launchAsync (FileBrowserComponent::saveMode | FileBrowserComponent::warnAboutOverwriting,
+                          [this, then] (const FileChooser& fc)
+                          {
+                              auto f = fc.getResult();
+                              const bool saved = f != File() && proc.saveKit (f.withFileExtension ("flipkit"));
+                              if (then) then (saved);
+                          });
+}
+
+void PadRomplerEditor::doClear (int what)
+{
+    if (what == 2) proc.newKit(); else proc.clearAllPads();
+    selectPad (selectedPad);
+    sequencerPage.selectTrack (what == 2 ? 0 : sequencerPage.getSelectedTrack());
+    repaint();
+}
+
+void PadRomplerEditor::clearAllRequested()
+{
+    SafePointer<PadRomplerEditor> safe (this);
+    auto* w = new AlertWindow ("Clear all", "What do you want to clear?\n\n"
+                               "Clear the pads: removes every sample; your patterns stay.\n"
+                               "New kit: clears the pads, every pattern and the Keys tracks.",
+                               MessageBoxIconType::NoIcon);
+    w->addButton ("Clear the pads", 1);
+    w->addButton ("New kit", 2);
+    w->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+    w->enterModalState (true, ModalCallbackFunction::create ([safe] (int what)
+    {
+        if (safe == nullptr || what == 0) return;
+        auto* ask = new AlertWindow ("Save your kit first?",
+                                     what == 2 ? "Starting a new kit clears your pads, patterns and Keys tracks."
+                                               : "This removes every sample from the pads.",
+                                     MessageBoxIconType::NoIcon);
+        ask->addButton ("Save...", 1);
+        ask->addButton ("Don't save", 2);
+        ask->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+        ask->enterModalState (true, ModalCallbackFunction::create ([safe, what] (int choice)
+        {
+            if (safe == nullptr || choice == 0) return;
+            if (choice == 2) { safe->doClear (what); return; }
+            safe->saveKitAs ([safe, what] (bool saved) { if (saved && safe != nullptr) safe->doClear (what); });   // cancelled save = nothing cleared
+        }), true);
+    }), true);
+}
+
 void PadRomplerEditor::tempoPadModesChanged (bool on)
 {
     proc.tempoPadModes = on;
@@ -796,7 +866,7 @@ bool PadRomplerEditor::keyPressed (const KeyPress& key)
             previewStrip.togglePlay();
         return true;
     }
-    if (key == KeyPress::escapeKey) { previewStrip.stop(); return true; }
+    if (key == KeyPress::escapeKey) { previewStrip.stop(); proc.stopAllSounds(); return true; }
     const auto cmd = key.getModifiers().isCommandDown();
     if (cmd && (key.getKeyCode() == 'Z' || key.getKeyCode() == 'z'))
     {

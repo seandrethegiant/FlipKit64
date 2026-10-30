@@ -183,11 +183,37 @@ void PadRomplerProcessor::moveLayer (int index, int layer, int delta)
 
 void PadRomplerProcessor::clearPad (int index) { setPad (index, std::make_shared<const PadState>()); }
 
-void PadRomplerProcessor::triggerPad (int index, float velocity)
+void PadRomplerProcessor::clearAllPads()
+{
+    stopAllSounds();
+    for (int i = 0; i < PadLayout::numPads; ++i) setPad (i, std::make_shared<const PadState>());
+    if (onPadsChanged) onPadsChanged();
+}
+
+void PadRomplerProcessor::newKit()
+{
+    clearAllPads();
+    for (auto& pat : patterns) { pat.clear(); pat.length = 16; pat.stepsPer2Beats = 8; }
+    resetKeysTracks();
+    scaleRoot = 0; scaleType = 0;
+    queuedPattern = -1;
+    currentPattern = 0;
+    kitLoads.fetch_add (1);
+    if (onPadsChanged) onPadsChanged();
+}
+
+void PadRomplerProcessor::triggerPad (int index, float velocity, bool held)
 {
     int s1, n1, s2, n2;
     reqFifo.prepareToWrite (1, s1, n1, s2, n2);
-    if (n1 > 0) { reqBuf[s1] = { index, velocity }; reqFifo.finishedWrite (1); }
+    if (n1 > 0) { reqBuf[s1] = { index, velocity, -1, 0, held }; reqFifo.finishedWrite (1); }
+}
+
+void PadRomplerProcessor::releasePad (int index)
+{
+    int s1, n1, s2, n2;
+    reqFifo.prepareToWrite (1, s1, n1, s2, n2);
+    if (n1 > 0) { reqBuf[s1] = { index, -1.0f }; reqFifo.finishedWrite (1); }
 }
 
 void PadRomplerProcessor::resetKeysTracks()
@@ -483,7 +509,7 @@ PadRomplerProcessor::Voice* PadRomplerProcessor::startVoice (const SamplePtr& s,
     v->step = v->stepTarget = v->baseStep * std::pow (2.0, semis / 12.0);
     v->glideCoef = 0.0f;
     v->keysTrack = keysTrack;
-    v->gateLeft = keysTrack >= 0 ? gate : 0;
+    v->gateLeft = gate;
     v->gainL = gain * jmin (1.0f, 1.0f - ps.pan);
     v->gainR = gain * jmin (1.0f, 1.0f + ps.pan);
     v->pad = padIndex;
@@ -511,10 +537,26 @@ PadRomplerProcessor::Voice* PadRomplerProcessor::startVoice (const SamplePtr& s,
     return v;
 }
 
-void PadRomplerProcessor::handleHit (int padIndex, float velocity)
+void PadRomplerProcessor::padRelease (int padIndex)
+{
+    for (auto& v : voices)
+        if (v.active && ! v.releasing && v.pad == padIndex && v.keysTrack < 0 && v.gateLeft < 0)
+            v.release (hostRate, 12.0);
+}
+
+void PadRomplerProcessor::handleHit (int padIndex, float velocity, int64 gate)
 {
     auto pad = std::atomic_load (&pads[padIndex]);
     if (pad == nullptr || pad->layers.empty()) return;
+    if (pad->play == PlayMode::Toggle)                  // already sounding: this press stops it
+    {
+        bool stopped = false;
+        for (auto& v : voices)
+            if (v.active && ! v.releasing && v.pad == padIndex && v.keysTrack < 0) { v.release (hostRate, 8.0); stopped = true; }
+        if (stopped) { hitCounter[padIndex].fetch_add (1, std::memory_order_relaxed); return; }
+    }
+    // Hold pads: a given gate (sequencer steps, auditions) or held until the pad is let go; others play out
+    gate = pad->play != PlayMode::Hold ? 0 : (gate == 0 ? -1 : gate);
     const int n = (int) pad->layers.size();
     int which = 0;
     switch (pad->mode)
@@ -524,7 +566,7 @@ void PadRomplerProcessor::handleHit (int padIndex, float velocity)
         case LayerMode::Random:     which = rng.nextInt (n); break;
     }
     const float vcurve = velocity * velocity * 0.7f + velocity * 0.3f;   // gentle curve
-    startVoice (pad->layers[(size_t) which], pad.get(), pad->gain * vcurve, padIndex, pad->start, pad->end);
+    startVoice (pad->layers[(size_t) which], pad.get(), pad->gain * vcurve, padIndex, pad->start, pad->end, -1, 0.0, gate);
     hitCounter[padIndex].fetch_add (1, std::memory_order_relaxed);
 }
 
@@ -708,7 +750,7 @@ void PadRomplerProcessor::scheduleSequencer (double ppq0, double ppqPerSample, i
                 if (numHits >= maxHits) return;
                 const int pos = jlimit (0, numSamples - 1, (int) ((t - ppq0) / ppqPerSample));
                 const float v = (float) vel / 127.0f * (j == 0 ? 1.0f : 0.85f);   // ratchet repeats slightly softer
-                hits[numHits++] = { pos, pad, v };
+                hits[numHits++] = { pos, pad, v, -1, 0, jmax ((int64) 1, (int64) (stepLen / rat / ppqPerSample)) };   // Hold pads: one step
             }
         }
     }
@@ -753,6 +795,13 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
         running = true;
     }
     wasInternalPlaying = intPlay && ! hostIsPlaying;
+    if (stopSoundsReq.exchange (false) || (wasRunning && ! running))   // Stop: fade out everything still sounding
+    {
+        for (auto& v : voices)
+            if (v.active && ! v.releasing && (v.pad >= 0 || v.keysTrack >= 0)) v.release (hostRate, 8.0);
+        for (auto& h : held) h.on = false;
+    }
+    wasRunning = running;
     lastPpqEnd = running ? ppq0 + ppqPerSample * numSamples : -1.0;
     if (! running)
     {
@@ -774,7 +823,7 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
         {
             if (numHits >= maxHits) return;
             if (r.track >= 0) hits[numHits++] = { 0, -1, r.velocity, r.track, r.pitch, (int64) (0.35 * hostRate) };
-            else              hits[numHits++] = { 0, r.pad, r.velocity };
+            else              hits[numHits++] = { 0, r.pad, r.velocity, -1, 0, r.held || r.velocity < 0.0f ? 0 : (int64) (0.3 * hostRate) };
         };
         for (int i = 0; i < n1; ++i) take (reqBuf[s1 + i]);
         for (int i = 0; i < n2; ++i) take (reqBuf[s2 + i]);
@@ -798,7 +847,7 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
     const bool tapActive = tapRunning && tapS != nullptr && tapMode.load() != tapOff;
 
     // A pad hit: plays it, records it when Rec is armed, or marks a chop point during tap chop.
-    auto playPad = [&] (int pad, float vel, int pos)
+    auto playPad = [&] (int pad, float vel, int pos, int64 gate = 0)
     {
             if (tapActive)                        // tap chop: the hit marks a chop point instead of playing
             {
@@ -808,7 +857,7 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
                 hitCounter[pad].fetch_add (1, std::memory_order_relaxed);   // still flash the pad
                 return;
             }
-            if (numHits < maxHits) hits[numHits++] = { pos, pad, vel };
+            if (numHits < maxHits) hits[numHits++] = { pos, pad, vel, -1, 0, gate };
             if (running)                          // remember it for Capture
             {
                 auto& e = capLog[capCount.load() % capSize];
@@ -842,7 +891,7 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
         else
         {
             pat.setStep (target, step, (uint8_t) jlimit (1, 127, (int) std::lround (vel * 127.0f)));
-            if (numHits < maxHits) hits[numHits++] = { pos, target, vel * 0.7f };   // hear what you added
+            if (numHits < maxHits) hits[numHits++] = { pos, target, vel * 0.7f, -1, 0, (int64) (0.3 * hostRate) };   // hear what you added
         }
         lastStepEdit = step;
         stepEdits.fetch_add (1);
@@ -874,7 +923,7 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
             {
                 switch (d[3])
                 {
-                    case 0x01: case 0x09: internalPlaying = false; seqRecord = false; break;   // stop / pause
+                    case 0x01: case 0x09: internalPlaying = false; seqRecord = false; stopSoundsReq = true; break;   // stop / pause
                     case 0x02: case 0x03: if (! hostIsPlaying) internalPlaying = true; break;  // play
                     case 0x06:                                                            // record: toggle
                         seqRecord = ! seqRecord.load();
@@ -890,7 +939,7 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
                 if ((b & 0x40) != 0)                              // release
                 {
                     const int rp = noteToPad[36 + (b & 0x3F)];
-                    if (rp >= 0) held[rp].on = false;
+                    if (rp >= 0) { held[rp].on = false; if (numHits < maxHits) hits[numHits++] = { pos, rp, -1.0f }; }
                     continue;
                 }
                 const int pad = noteToPad[36 + (b & 0x3F)];
@@ -941,7 +990,11 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
                 continue;
             }
             const int pad = noteToPad[note];
-            if (pad >= 0) held[pad].on = false;
+            if (pad >= 0)
+            {
+                held[pad].on = false;
+                if (numHits < maxHits) hits[numHits++] = { pos, pad, -1.0f };   // let go: Hold pads stop
+            }
         }
         else if (msg.isAllNotesOff() || msg.isAllSoundOff())
         {
@@ -960,19 +1013,21 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
         {
             auto& h = held[pad];
             if (! h.on) continue;
+            if (auto ps = std::atomic_load (&pads[pad]); ps != nullptr && ps->play == PlayMode::Toggle) continue;   // no rolls on toggles
+            const auto rollGate = (int64) jmax (1.0, rollSamples * 0.9);   // Hold pads: each repeat lasts until the next
             if (running)
             {
                 for (double g = std::ceil (ppq0 / iv) * iv; g < ppq1; g += iv)
                 {
                     if (h.pressPpq >= 0.0 && g < h.pressPpq + 0.5 * iv) continue;   // too close to the press itself
-                    playPad (pad, h.vel, jlimit (0, numSamples - 1, (int) ((g - ppq0) / ppqPerSample)));
+                    playPad (pad, h.vel, jlimit (0, numSamples - 1, (int) ((g - ppq0) / ppqPerSample)), rollGate);
                 }
             }
             else
             {
                 while (h.nextSample < (double) (sampleClock + numSamples))
                 {
-                    playPad (pad, h.vel, jlimit (0, numSamples - 1, (int) (h.nextSample - (double) sampleClock)));
+                    playPad (pad, h.vel, jlimit (0, numSamples - 1, (int) (h.nextSample - (double) sampleClock)), rollGate);
                     h.nextSample += jmax (1.0, rollSamples);
                 }
             }
@@ -1003,7 +1058,8 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
         rendered = jmax (rendered, hits[i].pos);
         const auto& h = hits[i];
         if (h.track >= 0) { if (h.velocity < 0.0f) releaseKey (h.track, h.pitch); else handleKeyHit (h.track, h.pitch, h.velocity, h.gate); }
-        else handleHit (h.pad, h.velocity);
+        else if (h.velocity < 0.0f) padRelease (h.pad);
+        else handleHit (h.pad, h.velocity, h.gate);
     }
     renderVoices (buffer, rendered, numSamples - rendered);
 
@@ -1165,6 +1221,7 @@ std::unique_ptr<XmlElement> PadRomplerProcessor::kitToXml() const
         pe->setAttribute ("reverse", p->reverse);
         pe->setAttribute ("mono", p->mono);
         pe->setAttribute ("choke", p->choke);
+        pe->setAttribute ("play", (int) p->play);
         for (auto& s : p->layers)
             pe->createNewChildElement ("Sample")->setAttribute ("file", s->file.getFullPathName());
     }
@@ -1256,6 +1313,7 @@ void PadRomplerProcessor::kitFromXml (const XmlElement& xml)
         st->reverse = pe->getBoolAttribute ("reverse", false);
         st->mono = pe->getBoolAttribute ("mono", false);
         st->choke = jlimit (0, 8, pe->getIntAttribute ("choke", 0));
+        st->play = (PlayMode) jlimit (0, 2, pe->getIntAttribute ("play", 0));
         for (auto* se : pe->getChildWithTagNameIterator ("Sample"))
             if (auto s = loadSample (File (se->getStringAttribute ("file"))))
                 st->layers.push_back (s);

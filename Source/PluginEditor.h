@@ -16,6 +16,7 @@ public:
     PadButton (EditorContext& ctx, int index, int row, int col);
     void paint (juce::Graphics&) override;
     void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
 
     bool isInterestedInFileDrag (const juce::StringArray&) override { return true; }
     void fileDragEnter (const juce::StringArray&, int, int) override { dragOver = true; repaint(); }
@@ -67,8 +68,9 @@ private:
     PadRomplerProcessor& proc;
     uint32_t lastHits[PadLayout::numPads] {};
 
-    juce::Label padTitle, nameLabel, hint, modeLabel, chokeLabel;
-    juce::ComboBox modeBox, chokeBox;
+    juce::Label padTitle, nameLabel, hint, modeLabel, chokeLabel, playLabel;
+    juce::ComboBox modeBox, chokeBox, playBox;
+    juce::TextButton stopAllButton { "Stop sounds" }, clearAllButton { "Clear all..." };
     Knob level { "Level" }, pan { "Pan" }, tune { "Tune" }, fine { "Fine" },
          start { "Start" }, end { "End" }, attack { "Attack" }, decay { "Decay" },
          cutoff { "Filter" }, reso { "Reso" };
@@ -104,6 +106,7 @@ public:
     void dropFiles (int padIndex, const juce::Array<juce::File>& files) override;
     void openInSampler (const juce::File& file) override;
     void tempoPadModesChanged (bool on) override;
+    void clearAllRequested() override;
 
     void showTab (int tab);
     bool keyPressed (const juce::KeyPress&) override;
@@ -166,6 +169,8 @@ private:
     juce::Label ctrlLabel;                 // which TempoPAD mode FlipKit64 is following
     int lastCtrlMode = -1, tabBeforeCtrl = -1;
     void updateCtrlLabel();
+    void saveKitAs (std::function<void (bool saved)> then);
+    void doClear (int what);               // 1 = all pads, 2 = new kit
 
     juce::Rectangle<int> browserArea, contentArea;
 

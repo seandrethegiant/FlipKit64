@@ -31,6 +31,9 @@ struct SampleData
 using SamplePtr = std::shared_ptr<const SampleData>;
 
 enum class LayerMode { RoundRobin = 0, Velocity, Random };
+// One-shot: plays to the end. Hold: plays while the pad is held (one step from the sequencer).
+// Toggle: one press starts it, the next press stops it.
+enum class PlayMode { OneShot = 0, Hold, Toggle };
 
 // Immutable snapshot of a pad. The editor builds a new one and swaps it in; the audio thread
 // only ever reads snapshots, so no locks are needed while playing.
@@ -53,6 +56,7 @@ struct PadState
     bool reverse = false;
     bool mono = false;                 // retrigger cuts the previous hit of this pad
     int choke = 0;                     // 0 = none, 1..8: pads in the same group cut each other
+    PlayMode play = PlayMode::OneShot;
 
     bool decayOff() const  { return decayMs >= 4999.0f; }
     bool filterOff() const { return cutoff >= 19999.0f; }
@@ -240,7 +244,11 @@ public:
     SamplePtr loadSample (const juce::File& file);
 
     // Auditioning from the editor
-    void triggerPad (int index, float velocity);
+    void triggerPad (int index, float velocity, bool held = false);   // held: a Hold pad plays until releasePad
+    void releasePad (int index);
+    void stopAllSounds() { stopSoundsReq = true; }   // fade out every pad and Keys sound (Stop, Esc)
+    void clearAllPads();
+    void newKit();                                   // pads, patterns and Keys tracks back to empty
     void previewFile (const juce::File& file);                 // load into the browser player and play
     void previewRegion (const SamplePtr& sample, float start, float end);
 
@@ -350,7 +358,10 @@ private:
     // A hit to start this block: a pad, or (track >= 0) a Keys note; velocity < 0 = that key's note-off.
     // gate = samples the note sounds (-1 = held until its note-off).
     struct Hit { int pos; int pad; float velocity; int track = -1; int pitch = 0; juce::int64 gate = 0; };
-    void handleHit (int padIndex, float velocity);
+    void handleHit (int padIndex, float velocity, juce::int64 gate = 0);
+    void padRelease (int padIndex);
+    std::atomic<bool> stopSoundsReq { false };
+    bool wasRunning = false;
     void handleKeyHit (int track, int pitch, float velocity, juce::int64 gate);
     void releaseKey (int track, int pitch);
     struct Voice;
@@ -431,7 +442,7 @@ private:
     uint8_t skipOnce[PadLayout::numPads][Seq::maxSteps] {};
 
     // editor -> audio requests (lock-free single-producer single-consumer)
-    struct Request { int pad; float velocity; int track = -1; int pitch = 0; };
+    struct Request { int pad; float velocity; int track = -1; int pitch = 0; bool held = false; };
     juce::AbstractFifo reqFifo { 64 };
     Request reqBuf[64];
     struct Preview { SamplePtr sample; float start = 0, end = 1; };
