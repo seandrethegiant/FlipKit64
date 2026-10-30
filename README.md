@@ -1,7 +1,7 @@
 # FlipKit64
 
 **A free 64-pad drum sampler, slicer and step sequencer (VST3 + standalone, Windows).**
-By seandrethegiant · Version 0.9.7 beta
+By seandrethegiant · Version 0.9.8 beta
 
 FlipKit64 is a pad instrument in the spirit of classic sampling drum machines: drop your samples onto an 8×8 grid of pads, chop loops and records into slices, shape each pad, and sequence it all in sync with your DAW. It works with any MIDI pad controller or keyboard, and the grid follows the common 64-pad "drum rack" note layout (notes 36–99) used by 8×8 pad controllers such as the Synido TempoPAD.
 
@@ -16,14 +16,18 @@ Source code and downloads: https://github.com/seandrethegiant/FlipKit64
 **Pads**
 - 64 pads; drag samples from the built-in browser or Windows Explorer onto a pad
 - Several samples per pad: round-robin, velocity layers or random
-- Per pad: level, pan, tune/fine, start/end, attack/decay, low-pass filter with resonance, reverse, mono, choke groups (1–8)
+- Per pad: level, pan, tune/fine, start/end, low-pass filter with resonance, reverse, mono, choke groups (1–8)
+- **Envelope** (attack, decay, sustain, release) you shape by dragging: the attack peak, the decay-to-sustain point and the release end, plus a diamond on each part to bend its curve. Drawn over the pad's waveform; **Pluck / Keys / Swell** presets, **Hear it** (plays the pad and lets go so you hear the release, with a dot following along), **Reset**, double-click a point to put it back. The release plays when a Hold pad is let go, a Toggle pad is stopped or a Keys note ends; one-shots play out. Kits from earlier versions sound the same.
 - **Play mode** per pad: **One-shot** (plays to the end, for drum hits), **Hold** (plays only while you hold the pad; one step long from the sequencer) or **Toggle** (one press starts it, the next stops it, for long loops and records)
 - **Stop sounds** (or Esc) silences everything still playing; stopping the transport (Stop on screen, on the TempoPAD or in LUNA) fades out pad sounds too
 - **Clear all...** clears every pad or starts a new kit (pads, patterns and Keys tracks), and offers to save your kit first
 - Click a pad to hear it (lower on the pad = softer)
 
 **Sampler**
-- Chop by transients, equal slices or by hand, then assign slices to pads in pad order
+- Chop by transients, equal slices, **beat grid** (1 bar, 1/4, 1/8 or 1/16 at the loop's tempo, found from the file name like "88bpm" or from the audio; type it to change it) or by hand
+- Select a slice to **nudge its start and end** (10 ms, snapping to zero crossings so there are no clicks), set its **gain, fade in, fade out** and **reverse**, and **loop it** while you edit. Already-assigned pads follow your changes.
+- **Tune** the slices up or down, **Normalize** and **Trim silence** (each saves a copy in `Recordings\Edits`), and **Undo / Redo** for all of it
+- **Assign slices to pads** (in order from the selected pad, shown on a little pad map), **Chop to pattern** (puts them on the pads and writes the current pattern playing them in order, in time) or **Send to Keys track** (one slice per key from C3 up, played from the piano roll or the TempoPAD's Key mode)
 - Tap chop: play the sample and hit pads to drop markers, or to chop each slice straight onto the pad you hit
 - Waveform zoom and scroll; loads samples up to 12 minutes
 - Resample FlipKit64's own output (or an audio input, if your DAW provides one); recordings are saved as WAV to `Documents\FlipKit64\Recordings`

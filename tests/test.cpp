@@ -61,6 +61,23 @@ static SamplePtr makeTone (double seconds, float freq, float decayPerSec = 0.0f)
     s->file = File ("/tmp/claude-0/tone.wav");
     return s;
 }
+
+// a drum-ish loop: a decaying click on every beat, louder on the bar
+static SamplePtr makeLoop (double bpm, int beats)
+{
+    auto s = std::make_shared<SampleData>();
+    s->sampleRate = SR;
+    const int beat = (int) std::round (SR * 60.0 / bpm);
+    s->audio.setSize (2, beat * beats);
+    s->audio.clear();
+    for (int b = 0; b < beats; ++b)
+        for (int i = 0; i < 3000 && b * beat + i < s->audio.getNumSamples(); ++i)
+        {
+            const float v = (b % 4 == 0 ? 0.9f : 0.5f) * std::exp (-i / 500.0f) * std::sin (i * 0.25f);
+            s->audio.setSample (0, b * beat + i, v); s->audio.setSample (1, b * beat + i, v);
+        }
+    return s;
+}
 static int padOfNote (int note) { for (int i = 0; i < 64; ++i) if (PadLayout::noteForPad (i) == note) return i; return -1; }
 static uint32_t hits (PadRomplerProcessor& p, int note) { return p.hitCounter[padOfNote (note)].load(); }
 
@@ -116,10 +133,44 @@ int main (int, char** argv)
         p.updatePad (A, [] (PadState& s) { s.end = 0.1f; });           // 0.3 s of a 3 s tone
         run (p, 1, 36); const float early = run (p, 100); run (p, 200); const float late = run (p, 100);
         check (early > 0.1f && late < 0.01f, "region end: stops at 10% of the sample");
-        p.updatePad (A, [] (PadState& s) { s.end = 1.0f; s.decayMs = 100.0f; });
+        p.updatePad (A, [] (PadState& s) { s.end = 1.0f; s.decayMs = 100.0f; s.sustain = 0.0f; });
         silence (p); run (p, 1, 36); run (p, 200); const float afterDecay = run (p, 20);
-        check (afterDecay < 0.01f, "decay: 100 ms decay fades the hit");
-        p.updatePad (A, [] (PadState& s) { s.decayMs = 5000.0f; s.cutoff = 100.0f; s.reso = 0.0f; });
+        check (afterDecay < 0.01f, "decay: 100 ms decay to sustain 0 fades the hit");
+
+        // ADSR (0.9.8)
+        p.updatePad (A, [] (PadState& s) { s.resetEnvelope(); });
+        silence (p); run (p, 1, 36); run (p, 40); const float plain = run (p, 20);
+        p.updatePad (A, [] (PadState& s) { s.decayMs = 50.0f; s.sustain = 0.5f; });
+        silence (p); run (p, 1, 36); run (p, 40); const float half = run (p, 20);
+        check (std::abs (half / plain - 0.5f) < 0.05f, ("sustain: decays to the sustain level and stays there (" + String (half / plain, 2) + ")").toRawUTF8());
+        p.updatePad (A, [] (PadState& s) { s.resetEnvelope(); s.attackMs = 300.0f; });
+        silence (p); run (p, 1, 36); const float rising = run (p, 4); run (p, 40); const float risen = run (p, 20);
+        check (rising < risen * 0.3f, "attack: fades in");
+        p.updatePad (A, [] (PadState& s) { s.attackMs = 300.0f; s.curveA = 1.0f; });
+        silence (p); run (p, 1, 36); const float fastRise = run (p, 4);
+        p.updatePad (A, [] (PadState& s) { s.curveA = -1.0f; });
+        silence (p); run (p, 1, 36); const float slowRise = run (p, 4);
+        check (fastRise > slowRise * 3.0f, "curves: a bent attack rises faster or slower");
+        p.updatePad (A, [] (PadState& s) { s.resetEnvelope(); });
+
+        {   // kits from before 0.9.8 sound the same
+            p.updatePad (A, [] (PadState& s) { s.decayMs = 250.0f; s.sustain = 0.0f; });
+            p.updatePad (B, [] (PadState& s) { s.decayMs = 5000.0f; });
+            auto x = p.kitToXml();
+            for (auto* pe : x->getChildWithTagNameIterator ("Pad"))
+                for (auto* a : { "sustain", "release", "curveA", "curveD", "curveR" }) pe->removeAttribute (a);
+            PadRomplerProcessor o; o.kitFromXml (*x);
+            check (o.getPad (A)->sustain == 0.0f && o.getPad (A)->curveD == 1.0f && o.getPad (A)->decayMs == 250.0f
+                   && o.getPad (B)->sustain == 1.0f, "old kits: Decay becomes a fade to silence, Decay off plays the whole sound");
+            PadRomplerProcessor n;
+            p.updatePad (A, [] (PadState& s) { s.sustain = 0.4f; s.releaseMs = 700.0f; s.curveR = -0.3f; });
+            n.kitFromXml (*p.kitToXml());
+            check (n.getPad (A)->sustain == 0.4f && n.getPad (A)->releaseMs == 700.0f && std::abs (n.getPad (A)->curveR + 0.3f) < 1e-6f,
+                   "kits keep the envelope");
+            p.updatePad (A, [] (PadState& s) { s.resetEnvelope(); });
+            p.updatePad (B, [] (PadState& s) { s.resetEnvelope(); });
+        }
+        p.updatePad (A, [] (PadState& s) { s.cutoff = 100.0f; s.reso = 0.0f; });
         silence (p); run (p, 1, 36); run (p, 30); const float filtered = run (p, 30);
         p.updatePad (A, [] (PadState& s) { s.cutoff = 20000.0f; });
         silence (p); run (p, 1, 36); run (p, 30); const float open = run (p, 30);
@@ -206,6 +257,13 @@ int main (int, char** argv)
         send (MidiMessage::noteOff (1, 36));
         level (0.1);
         check (holding > 0.05 && level (0.2) < 1e-4, "Hold: plays while held, stops when let go");
+
+        q.updatePad (A, [] (PadState& s) { s.releaseMs = 600.0f; });  // the release rings out after letting go
+        send (MidiMessage::noteOn (1, 36, 1.0f)); level (0.2);
+        send (MidiMessage::noteOff (1, 36));
+        const float tail = level (0.15); level (0.5);
+        check (tail > holding * 0.1f && level (0.2) < 1e-4, "release: a Hold pad rings out for its release time, then stops");
+        q.updatePad (A, [] (PadState& s) { s.releaseMs = 100.0f; });
 
         setPlay (PlayMode::Toggle);
         send (MidiMessage::noteOn (1, 36, 1.0f)); send (MidiMessage::noteOff (1, 36));
@@ -726,6 +784,59 @@ int main (int, char** argv)
         check (e.size() == 3 && e[0] == n / 4 && e[2] == 3 * n / 4, "equal slices: 4 slices = 3 markers");
     }
 
+    {   // ---------------- sampler slice tools (0.9.8)
+        check (SamplerPage::bpmFromName ("Rainy Keys 88bpm") == 88.0 && SamplerPage::bpmFromName ("break_96_BPM_v2") == 96.0
+               && SamplerPage::bpmFromName ("BPM120 loop") == 120.0 && SamplerPage::bpmFromName ("Kick 808") == 0.0,
+               "BPM from file names (88bpm, 96_BPM, BPM120; none in 'Kick 808')");
+        auto loop = makeLoop (100.0, 16);
+        const double found = SamplerPage::detectBpm (*loop);
+        check (std::abs (found - 100.0) < 0.6, ("BPM detection on a 16-beat loop at 100 (" + String (found, 1) + ")").toRawUTF8());
+        auto g = SamplerPage::gridSlices (loop->audio.getNumSamples(), SR, 100.0, 1.0);
+        check (g.size() == 15 && std::abs (g[0] - (int) (0.6 * SR)) <= 1, "beat grid: 16 beats = 16 slices, each 0.6 s at 100 BPM");
+        check (SamplerPage::gridSlices (loop->audio.getNumSamples(), SR, 100.0, 4.0).size() == 3, "beat grid: 1 bar slices");
+        auto tone = makeTone (0.1, 100.0f);
+        const int zc = SamplerPage::nearestZeroCrossing (*tone, 200);
+        check (std::abs (zc - (int) (SR / 200.0)) <= 1, ("zero-crossing snap finds the sine's crossing (" + String (zc) + ")").toRawUTF8());
+        auto nrm = SamplerPage::normalized (*tone);
+        check (std::abs (nrm->audio.getMagnitude (0, 0, nrm->audio.getNumSamples()) - 0.98f) < 0.01f, "normalize: peak to -0.2 dB");
+        SampleData pad; pad.sampleRate = SR; pad.audio.setSize (2, 30000); pad.audio.clear();
+        for (int i = 10000; i < 20000; ++i) { pad.audio.setSample (0, i, 0.5f); pad.audio.setSample (1, i, 0.5f); }
+        int lead = 0; auto tr = SamplerPage::trimmed (pad, lead);
+        check (tr != nullptr && lead == 10000 - 64 && tr->audio.getNumSamples() < 12000, "trim silence: cuts the quiet start and end");
+        auto ps = SamplerPage::patternSteps ({ 0, (int) (0.6 * SR), (int) (1.2 * SR), (int) (1.5 * SR) }, SR, 100.0, 4.0, 64);
+        check (ps.size() == 4 && ps[1].second == 4 && ps[2].second == 8 && ps[3].second == 10, "chop to pattern: slices land on their 16th-note steps");
+        check (SamplerPage::patternSteps ({ 0, 100, 200 }, SR, 0.0, 4.0, 2).size() == 2, "chop to pattern: no BPM = one slice per step");
+
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);           // Keys track in slice mode: one pad per key, unpitched
+        const int first = padOfNote (36);
+        q.assignRegion (first, makeTone (1.0, 220.0f), 0, 1, "s1");
+        q.assignRegion (padOfNote (37), makeTone (1.0, 440.0f), 0, 1, "s2");
+        q.keysTracks[2].sourcePad = first; q.keysTracks[2].root = 60; q.keysTracks[2].sliceCount = 2;
+        auto freqOf = [&] (int pitch)
+        {
+            q.stopAllSounds(); run (q, 200);
+            q.triggerKey (2, pitch, 1.0f);
+            AudioBuffer<float> b (2, 8192); b.clear(); MidiBuffer mb;
+            AudioBuffer<float> warm (2, BS); q.processBlock (warm, mb);
+            q.processBlock (b, mb);
+            if (b.getMagnitude (0, 0, 8192) < 1.0e-3f) return 0.0;
+            int zx = 0; for (int i = 1; i < 8192; ++i) if (b.getSample (0, i - 1) <= 0 && b.getSample (0, i) > 0) ++zx;
+            return zx * SR / 8192.0;
+        };
+        const double f0 = freqOf (60), f1 = freqOf (61), f2 = freqOf (62);
+        check (std::abs (f0 - 220) < 15 && std::abs (f1 - 440) < 25 && f2 < 1.0,
+               ("slice keys: C3 plays slice 1, C#3 slice 2, past the slices nothing (" + String (f0, 0) + ", " + String (f1, 0) + ", " + String (f2, 0) + ")").toRawUTF8());
+        MemoryBlock mb2; q.getStateInformation (mb2);
+        PadRomplerProcessor r2; r2.setStateInformation (mb2.getData(), (int) mb2.getSize());
+        check (r2.keysTracks[2].sliceCount.load() == 2, "state keeps a Keys track's slice mode");
+
+        q.updatePad (first, [] (PadState& x) { x.fadeOutMs = 400.0f; x.end = 0.5f; });   // fade out: quiet near the region end
+        q.stopAllSounds(); run (q, 30);
+        run (q, 1, 36); run (q, (int) (0.1 * SR / BS)); const float body = run (q, 4);
+        run (q, (int) (0.28 * SR / BS)); const float nearEnd = run (q, 4);
+        check (nearEnd < body * 0.35f, "slice fade out: the end of the region fades");
+    }
+
 
 
     {   // ---------------- browser player
@@ -827,6 +938,92 @@ int main (int, char** argv)
         check (waitList (*lib, loc, "Demo Kit", ok, e, err) && ok && e.size() == 9, "network: reconnects fine after errors");
     }
    #endif
+    if (std::getenv ("DISPLAY") != nullptr)
+    {   // ---------------- Sampler page: beat-grid chop, chop to pattern, send to Keys, undo (0.9.8)
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        std::unique_ptr<AudioProcessorEditor> base (q.createEditor());
+        auto* ed = dynamic_cast<PadRomplerEditor*> (base.get());
+        ed->setSize (1280, 780);
+        SamplerPage* sp = nullptr;
+        for (auto* c : ed->getChildren()) if (auto* x = dynamic_cast<SamplerPage*> (c)) sp = x;
+        auto loop = makeLoop (96.0, 8);
+        const File wavFile = File::getSpecialLocation (File::tempDirectory).getChildFile ("Dusty Loop 96bpm.wav");
+        wavFile.deleteFile();
+        {
+            WavAudioFormat wav; auto* os = wavFile.createOutputStream().release();
+            std::unique_ptr<AudioFormatWriter> w (wav.createWriterFor (os, SR, 2, 24, {}, 0));
+            w->writeFromAudioSampleBuffer (loop->audio, 0, loop->audio.getNumSamples());
+        }
+        ed->selectPad (padOfNote (36));
+        sp->loadFile (wavFile);
+        check (sp->bpm == 96.0, "sampler: tempo from the file name");
+        sp->setChopMode (3); sp->gridBeats = 1.0;
+        sp->doChop();
+        check (sp->getWave().slices().size() == 8, "sampler: beat-grid chop makes one slice per beat");
+        sp->sliceSet[2].gainDb = -6.0f; sp->sliceSet[3].reverse = true;
+        q.currentPattern = 2; q.patterns[2].stepsPer2Beats = 4;     // 1/8 steps
+        sp->chopToPattern();
+        auto& pat = q.patterns[2];
+        bool inOrder = pat.length.load() == 16;
+        for (int i = 0; i < 8; ++i) inOrder = inOrder && pat.vel[padOfNote (36 + i)][i * 2].load() == 100 && pat.vel[padOfNote (36 + i)][i * 2 + 1].load() == 0;
+        check (inOrder, "chop to pattern: slice n plays on beat n (1/8 steps), on pads 36-43");
+        check (std::abs (q.getPad (padOfNote (38))->gain - 0.501f) < 0.01f && q.getPad (padOfNote (39))->reverse,
+               "slices take their gain and reverse to the pads");
+        sp->sliceSet[2].gainDb = 0.0f;
+        sp->sendToKeys (1);
+        check (q.keysTracks[1].sliceCount.load() == 8 && q.keysTracks[1].sourcePad.load() == padOfNote (36), "send to Keys: a track plays the 8 slices");
+        const size_t before = sp->getWave().markers.size();
+        sp->setChopMode (2); sp->doChop();
+        sp->undo();
+        check (sp->getWave().markers.size() == before && sp->sliceSet.size() == 8 && sp->sliceSet[3].reverse, "sampler undo: brings back the slices and their settings");
+        sp->redo();
+        check (sp->getWave().markers.size() != before, "sampler redo");
+        sp->undo();
+        if (auto* snap3 = std::getenv ("FLIPKIT_SNAP3"))
+        {
+            sp->setChopMode (3);
+            ed->showTab (1);
+            sp->getWave().selectedSlice = 2;
+            sp->getWave().onSliceClicked (2);
+            MessageManager::getInstance()->runDispatchLoopUntil (300);
+            auto img = ed->createComponentSnapshot (ed->getLocalBounds());
+            const File f { String (snap3) + "-sampler-loop.png" }; f.deleteFile(); FileOutputStream o { f };
+            PNGImageFormat().writeImageToStream (img, o);
+        }
+        wavFile.deleteFile();
+    }
+    if (auto* snap3 = std::getenv ("FLIPKIT_SNAP3"))
+    {   // ---------------- 0.9.8 screenshots: envelope editor, sampler
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        std::unique_ptr<AudioProcessorEditor> base (q.createEditor());
+        auto* ed = dynamic_cast<PadRomplerEditor*> (base.get());
+        ed->setSize (1280, 780);
+        const int pad = padOfNote (44);
+        q.assignRegion (padOfNote (36), makeTone (0.2, 60.0f, 10.0f), 0, 1, "Kick");
+        q.assignRegion (padOfNote (37), makeTone (0.2, 200.0f, 10.0f), 0, 1, "Snare");
+        q.assignRegion (pad, makeTone (2.0, 262.0f, 1.2f), 0, 1, "Rhodes C3");
+        q.updatePad (pad, [] (PadState& s) { s.play = PlayMode::Hold; s.attackMs = 40; s.decayMs = 420; s.sustain = 0.55f; s.releaseMs = 700; s.curveD = 0.6f; s.curveR = 0.6f; });
+        ed->showTab (0);
+        ed->selectPad (pad);
+        MessageManager::getInstance()->runDispatchLoopUntil (200);
+        auto shot = [&] (const String& name)
+        {
+            auto img = ed->createComponentSnapshot (ed->getLocalBounds());
+            const File f { String (snap3) + "-" + name + ".png" }; f.deleteFile(); FileOutputStream o { f };
+            PNGImageFormat().writeImageToStream (img, o);
+        };
+        shot ("pads");
+        for (auto* c : ed->getChildren())
+            if (auto* pp = dynamic_cast<PadsPage*> (c))
+            {
+                pp->envelope.hearIt();
+                MessageManager::getInstance()->runDispatchLoopUntil (700);
+                shot ("hear");
+            }
+        ed->showTab (1);
+        MessageManager::getInstance()->runDispatchLoopUntil (200);
+        shot ("sampler");
+    }
     std::printf ("%d failures\n", fails);
     return fails;
 }

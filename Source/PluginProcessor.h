@@ -19,6 +19,7 @@ namespace PadLayout
     }
     inline int padIndex (int row, int col) { return row * cols + col; }
     inline int noteForPad (int pad) { return noteFor (pad / cols, pad % cols); }
+    inline int padForNote (int note) { for (int p = 0; p < numPads; ++p) if (noteForPad (p) == note) return p; return -1; }
 }
 
 // One loaded sample.
@@ -37,6 +38,16 @@ enum class PlayMode { OneShot = 0, Hold, Toggle };
 
 // Immutable snapshot of a pad. The editor builds a new one and swaps it in; the audio thread
 // only ever reads snapshots, so no locks are needed while playing.
+// Envelope segment shape, 0..1 over t = 0..1. Curve +1 rises fast then levels off (like a natural decay),
+// -1 starts slow, 0 is a straight line. Curve +1 on a decay to 0 matches the old exponential Decay knob.
+inline float envCurveK (float curve) { return -6.9f * curve; }
+inline float envShape (float t, float curve)
+{
+    const float k = envCurveK (curve);
+    if (std::abs (k) < 1.0e-3f) return t;
+    return (std::exp (k * t) - 1.0f) / (std::exp (k) - 1.0f);
+}
+
 struct PadState
 {
     juce::String name;
@@ -49,8 +60,14 @@ struct PadState
     float tune = 0.0f;                 // semitones -24 .. 24
     float fine = 0.0f;                 // cents -100 .. 100
     float start = 0.0f, end = 1.0f;    // region within each sample, 0..1
+    // ADSR envelope. Sustain 100% = plays the whole region (the old "decay off"). The release runs when a
+    // Hold pad is let go, a Toggle pad is stopped or a Keys note ends; one-shot hits just play out.
     float attackMs = 0.0f;             // 0 .. 2000
-    float decayMs = 5000.0f;           // 10 .. 5000, 5000 = off (play whole region)
+    float decayMs = 300.0f;            // 10 .. 5000
+    float sustain = 1.0f;              // 0 .. 1
+    float releaseMs = 100.0f;          // 5 .. 5000
+    float curveA = 0.0f, curveD = 0.7f, curveR = 0.8f;   // -1 .. 1: + = fast start, - = slow start, 0 = straight
+    float fadeOutMs = 0.0f;            // fade at the end of the region (0 = just a click-free edge)
     float cutoff = 20000.0f;           // Hz, 20000 = filter off
     float reso = 0.0f;                 // 0 .. 1
     bool reverse = false;
@@ -58,7 +75,8 @@ struct PadState
     int choke = 0;                     // 0 = none, 1..8: pads in the same group cut each other
     PlayMode play = PlayMode::OneShot;
 
-    bool decayOff() const  { return decayMs >= 4999.0f; }
+    void resetEnvelope() { const PadState d; attackMs = d.attackMs; decayMs = d.decayMs; sustain = d.sustain;
+                           releaseMs = d.releaseMs; curveA = d.curveA; curveD = d.curveD; curveR = d.curveR; }
     bool filterOff() const { return cutoff >= 19999.0f; }
 };
 using PadPtr = std::shared_ptr<const PadState>;
@@ -246,11 +264,13 @@ public:
     // Auditioning from the editor
     void triggerPad (int index, float velocity, bool held = false);   // held: a Hold pad plays until releasePad
     void releasePad (int index);
+    void auditionRelease (int index);       // let go of a pad's sounds whatever its play mode (envelope "Hear it")
     void stopAllSounds() { stopSoundsReq = true; }   // fade out every pad and Keys sound (Stop, Esc)
     void clearAllPads();
     void newKit();                                   // pads, patterns and Keys tracks back to empty
     void previewFile (const juce::File& file);                 // load into the browser player and play
-    void previewRegion (const SamplePtr& sample, float start, float end);
+    void previewRegion (const SamplePtr& sample, float start, float end, const PadState* shape = nullptr);
+    SamplePtr saveEdited (const SampleData& audio, const juce::String& name);   // writes a WAV beside the recordings, loads it
 
     // Browser player: one file at a time, with play / pause / stop / seek / loop.
     void playerLoad (const SamplePtr& sample, bool autoPlay);
@@ -293,6 +313,7 @@ public:
         std::atomic<bool> mono { false };
         std::atomic<float> glideMs { 0.0f };     // mono only: slide into the next note
         std::atomic<float> level { 1.0f };
+        std::atomic<int> sliceCount { 0 };       // >0: slice mode - key root+i plays the pad i notes above sourcePad, unpitched
         juce::String name;                       // message thread
     };
     KeysTrack keysTracks[Keys::numTracks];
@@ -350,9 +371,10 @@ public:
 
     static juce::File recordingsFolder();
 
-private:
     std::unique_ptr<juce::XmlElement> kitToXml() const;
     void kitFromXml (const juce::XmlElement& xml);
+
+private:
     void timerCallback() override;          // frees retired snapshots off the audio thread
 
     // A hit to start this block: a pad, or (track >= 0) a Keys note; velocity < 0 = that key's note-off.
@@ -410,11 +432,17 @@ private:
         double pos = 0.0, step = 1.0;
         double regionStart = 0.0, regionEnd = 0.0;
         bool reverse = false;
+        double fadeOut = 64.0;     // source samples faded at the region's end
         float gainL = 0.0f, gainR = 0.0f;
         int pad = -1, choke = 0;
-        // envelope
-        float env = 0.0f, attackInc = 1.0f, decayCoef = 1.0f;
-        bool inAttack = false, decaying = false, releasing = false;
+        // envelope: ADSR segments (stage) plus a separate quick fade (releasing) for choke, steal and stop
+        enum Stage : uint8_t { stAttack, stDecay, stSustain, stRelease };
+        float env = 0.0f;
+        uint8_t stage = stSustain;
+        double segT = 0.0, segInc = 0.0, decInc = 0.0, relInc = 0.0;
+        float segFrom = 0.0f, segTo = 0.0f, segK = 0.0f, segDen = 1.0f;
+        float sustainLvl = 1.0f, kD = 0.0f, kR = 0.0f;
+        bool releasing = false;
         float releaseCoef = 0.0f;
         // filter (TPT state-variable lowpass)
         bool filterOn = false;
@@ -427,6 +455,12 @@ private:
         double baseStep = 1.0, stepTarget = 1.0;
         float glideCoef = 0.0f;
         void release (double sr, double ms = 4.0) { releasing = true; releaseCoef = (float) std::exp (-1.0 / (ms * 0.001 * sr)); }
+        void beginSegment (uint8_t st, float from, float to, float k, double inc)
+        {
+            stage = st; segT = 0.0; segInc = inc; segFrom = from; segTo = to; segK = k;
+            segDen = std::abs (k) < 1.0e-3f ? 1.0f : std::exp (k) - 1.0f;
+        }
+        void noteOff() { if (! releasing && stage != stRelease) beginSegment (stRelease, env, 0.0f, kR, relInc); }
     };
     static constexpr int maxVoices = 128;
     Voice voices[maxVoices];
@@ -445,7 +479,7 @@ private:
     struct Request { int pad; float velocity; int track = -1; int pitch = 0; bool held = false; };
     juce::AbstractFifo reqFifo { 64 };
     Request reqBuf[64];
-    struct Preview { SamplePtr sample; float start = 0, end = 1; };
+    struct Preview { SamplePtr sample; float start = 0, end = 1; bool shaped = false; PadState shape; };
     std::shared_ptr<const Preview> pendingPreview;
     std::atomic<bool> previewWaiting { false };
 

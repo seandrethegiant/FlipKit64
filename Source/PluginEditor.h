@@ -1,5 +1,6 @@
 #pragma once
 #include "Common.h"
+#include "EnvelopeEditor.h"
 #include "SamplerPage.h"
 #include "SequencerPage.h"
 #include "NetBrowser.h"
@@ -72,8 +73,10 @@ private:
     juce::ComboBox modeBox, chokeBox, playBox;
     juce::TextButton stopAllButton { "Stop sounds" }, clearAllButton { "Clear all..." };
     Knob level { "Level" }, pan { "Pan" }, tune { "Tune" }, fine { "Fine" },
-         start { "Start" }, end { "End" }, attack { "Attack" }, decay { "Decay" },
-         cutoff { "Filter" }, reso { "Reso" };
+         start { "Start" }, end { "End" }, cutoff { "Filter" }, reso { "Reso" };
+public:
+    EnvelopePanel envelope { ctx };
+private:
     juce::ToggleButton reverseToggle { "Reverse" }, monoToggle { "Mono" };
     LayerList layerModel { ctx };
     juce::ListBox layerList { "Layers", &layerModel };

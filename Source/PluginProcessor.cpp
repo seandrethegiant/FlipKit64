@@ -216,13 +216,20 @@ void PadRomplerProcessor::releasePad (int index)
     if (n1 > 0) { reqBuf[s1] = { index, -1.0f }; reqFifo.finishedWrite (1); }
 }
 
+void PadRomplerProcessor::auditionRelease (int index)
+{
+    int s1, n1, s2, n2;
+    reqFifo.prepareToWrite (1, s1, n1, s2, n2);
+    if (n1 > 0) { reqBuf[s1] = { index, -2.0f }; reqFifo.finishedWrite (1); }
+}
+
 void PadRomplerProcessor::resetKeysTracks()
 {
     for (int t = 0; t < Keys::numTracks; ++t)
     {
         auto& kt = keysTracks[t];
         kt.name = "Keys " + String (t + 1);
-        kt.sourcePad = -1; kt.root = 60; kt.mono = false; kt.glideMs = 0.0f; kt.level = 1.0f;
+        kt.sourcePad = -1; kt.root = 60; kt.mono = false; kt.glideMs = 0.0f; kt.level = 1.0f; kt.sliceCount = 0;
     }
     keysTracks[1].name = "Bass";                 // a mono, gliding bass track out of the box
     keysTracks[1].mono = true;
@@ -270,11 +277,12 @@ void PadRomplerProcessor::drainKeyRecordings()
     keysRecorded.fetch_add (1);
 }
 
-void PadRomplerProcessor::previewRegion (const SamplePtr& s, float start, float end)
+void PadRomplerProcessor::previewRegion (const SamplePtr& s, float start, float end, const PadState* shape)
 {
     if (s == nullptr) return;
     auto p = std::make_shared<Preview>();
     p->sample = s; p->start = start; p->end = end;
+    if (shape != nullptr) { p->shaped = true; p->shape = *shape; p->shape.layers.clear(); }
     std::shared_ptr<const Preview> cp = p;
     retiredPreviews.push_back (cp);            // message thread keeps a reference
     std::atomic_store (&pendingPreview, cp);
@@ -442,6 +450,23 @@ void PadRomplerProcessor::stopRecording()
     recState.compare_exchange_strong (expected, recFinished);
 }
 
+SamplePtr PadRomplerProcessor::saveEdited (const SampleData& src, const String& name)
+{
+    auto folder = recordingsFolder().getChildFile ("Edits");
+    folder.createDirectory();
+    auto file = folder.getNonexistentChildFile (File::createLegalFileName (name), ".wav", false);
+    {
+        WavAudioFormat wav;
+        std::unique_ptr<OutputStream> stream (file.createOutputStream());
+        if (stream == nullptr) return nullptr;
+        std::unique_ptr<AudioFormatWriter> writer (wav.createWriterFor (stream.get(), src.sampleRate, 2, 24, {}, 0));
+        if (writer == nullptr) return nullptr;
+        stream.release();
+        writer->writeFromAudioSampleBuffer (src.audio, 0, src.audio.getNumSamples());
+    }
+    return loadSample (file);
+}
+
 File PadRomplerProcessor::saveRecording()
 {
     if (recState.load() != recFinished) return {};
@@ -504,6 +529,7 @@ PadRomplerProcessor::Voice* PadRomplerProcessor::startVoice (const SamplePtr& s,
     v->regionStart = rs;
     v->regionEnd = re;
     v->reverse = ps.reverse;
+    v->fadeOut = jmax (64.0, ps.fadeOutMs * 0.001 * s->sampleRate);
     v->pos = ps.reverse ? re - 1.0 : rs;
     v->baseStep = s->sampleRate / hostRate * std::pow (2.0, (ps.tune + ps.fine / 100.0) / 12.0);
     v->step = v->stepTarget = v->baseStep * std::pow (2.0, semis / 12.0);
@@ -516,10 +542,17 @@ PadRomplerProcessor::Voice* PadRomplerProcessor::startVoice (const SamplePtr& s,
     v->choke = keysTrack >= 0 ? 0 : ps.choke;
 
     v->releasing = false;
-    if (ps.attackMs > 0.5f) { v->env = 0.0f; v->inAttack = true; v->attackInc = (float) (1.0 / (ps.attackMs * 0.001 * hostRate)); }
-    else                    { v->env = 1.0f; v->inAttack = false; }
-    v->decaying = ! ps.decayOff();
-    if (v->decaying) v->decayCoef = (float) std::exp (std::log (0.001) / (jmax (10.0f, ps.decayMs) * 0.001 * hostRate));
+    {
+        const double perMs = 0.001 * hostRate;
+        v->sustainLvl = jlimit (0.0f, 1.0f, ps.sustain);
+        v->kD = envCurveK (ps.curveD);
+        v->kR = envCurveK (ps.curveR);
+        v->decInc = 1.0 / (jmax (1.0f, ps.decayMs) * perMs);
+        v->relInc = 1.0 / (jmax (1.0f, ps.releaseMs) * perMs);
+        if (ps.attackMs > 0.5f)              { v->env = 0.0f; v->beginSegment (Voice::stAttack, 0.0f, 1.0f, envCurveK (ps.curveA), 1.0 / (ps.attackMs * perMs)); }
+        else if (v->sustainLvl < 0.9999f)    { v->env = 1.0f; v->beginSegment (Voice::stDecay, 1.0f, v->sustainLvl, v->kD, v->decInc); }
+        else                                 { v->env = 1.0f; v->stage = Voice::stSustain; }
+    }
 
     v->filterOn = ! ps.filterOff();
     if (v->filterOn)
@@ -541,7 +574,7 @@ void PadRomplerProcessor::padRelease (int padIndex)
 {
     for (auto& v : voices)
         if (v.active && ! v.releasing && v.pad == padIndex && v.keysTrack < 0 && v.gateLeft < 0)
-            v.release (hostRate, 12.0);
+            v.noteOff();
 }
 
 void PadRomplerProcessor::handleHit (int padIndex, float velocity, int64 gate)
@@ -552,7 +585,7 @@ void PadRomplerProcessor::handleHit (int padIndex, float velocity, int64 gate)
     {
         bool stopped = false;
         for (auto& v : voices)
-            if (v.active && ! v.releasing && v.pad == padIndex && v.keysTrack < 0) { v.release (hostRate, 8.0); stopped = true; }
+            if (v.active && ! v.releasing && v.stage != Voice::stRelease && v.pad == padIndex && v.keysTrack < 0) { v.noteOff(); stopped = true; }
         if (stopped) { hitCounter[padIndex].fetch_add (1, std::memory_order_relaxed); return; }
     }
     // Hold pads: a given gate (sequencer steps, auditions) or held until the pad is let go; others play out
@@ -576,9 +609,18 @@ void PadRomplerProcessor::handleKeyHit (int t, int pitch, float velocity, int64 
     auto& kt = keysTracks[t];
     const int src = kt.sourcePad.load();
     if (! isPositiveAndBelow (src, PadLayout::numPads)) return;
-    auto pad = std::atomic_load (&pads[src]);
+    double semis = pitch - kt.root.load();
+    int padIdx = src;
+    if (const int nSlices = kt.sliceCount.load(); nSlices > 0)        // slice mode: one pad per key, unpitched
+    {
+        const int k = pitch - kt.root.load();
+        if (! isPositiveAndBelow (k, nSlices)) return;
+        padIdx = PadLayout::padForNote (PadLayout::noteForPad (src) + k);
+        if (padIdx < 0) return;
+        semis = 0.0;
+    }
+    auto pad = std::atomic_load (&pads[padIdx]);
     if (pad == nullptr || pad->layers.empty()) return;
-    const double semis = pitch - kt.root.load();
     const float vcurve = velocity * velocity * 0.7f + velocity * 0.3f;
     const float gain = pad->gain * vcurve * kt.level.load();
 
@@ -587,8 +629,8 @@ void PadRomplerProcessor::handleKeyHit (int t, int pitch, float velocity, int64 
         const float gl = kt.glideMs.load();
         for (auto& v : voices)
         {
-            if (! v.active || v.releasing || v.keysTrack != t) continue;
-            if (gl > 0.5f)                                  // slide the sounding note to the new pitch
+            if (! v.active || v.releasing || v.stage == Voice::stRelease || v.keysTrack != t) continue;
+            if (gl > 0.5f && padIdx == src && kt.sliceCount.load() == 0)   // slide the sounding note to the new pitch
             {
                 v.stepTarget = v.baseStep * std::pow (2.0, semis / 12.0);
                 v.glideCoef = (float) std::exp (-1.0 / (gl * 0.001 * hostRate));
@@ -609,7 +651,7 @@ void PadRomplerProcessor::releaseKey (int t, int pitch)
 {
     for (auto& v : voices)
         if (v.active && ! v.releasing && v.keysTrack == t && v.keysPitch == pitch && v.gateLeft < 0)
-            v.release (hostRate, 12.0);
+            v.noteOff();
 }
 
 void PadRomplerProcessor::renderVoices (AudioBuffer<float>& buffer, int start, int count)
@@ -624,7 +666,7 @@ void PadRomplerProcessor::renderVoices (AudioBuffer<float>& buffer, int start, i
         const auto& a = v.sample->audio;
         const float* sl = a.getReadPointer (0);
         const float* sr = a.getReadPointer (1);
-        const double fadeLen = 64.0;     // source samples: short fade at the region edge (no clicks on chops)
+        const double fadeLen = v.fadeOut;     // source samples: fade at the region edge (no clicks on chops)
 
         for (int i = 0; i < count; ++i)
         {
@@ -651,11 +693,31 @@ void PadRomplerProcessor::renderVoices (AudioBuffer<float>& buffer, int start, i
                 }
             }
 
-            if (v.gateLeft > 0 && --v.gateLeft == 0 && ! v.releasing) v.release (hostRate, 12.0);   // Keys note ends
+            if (v.gateLeft > 0 && --v.gateLeft == 0) v.noteOff();          // gate ends: Keys note, sequenced Hold step
             if (v.glideCoef > 0.0f) v.step = v.stepTarget + (v.step - v.stepTarget) * v.glideCoef;
-            if (v.releasing)        { v.env *= v.releaseCoef; if (v.env < 1.0e-4f) { v.active = false; break; } }
-            else if (v.inAttack)    { v.env += v.attackInc; if (v.env >= 1.0f) { v.env = 1.0f; v.inAttack = false; } }
-            else if (v.decaying)    { v.env *= v.decayCoef; if (v.env < 1.0e-4f) { v.active = false; break; } }
+            if (v.releasing) { v.env *= v.releaseCoef; if (v.env < 1.0e-4f) { v.active = false; break; } }
+            else if (v.stage != Voice::stSustain)
+            {
+                v.segT += v.segInc;
+                if (v.segT >= 1.0)
+                {
+                    v.env = v.segTo;
+                    if (v.stage == Voice::stAttack)
+                    {
+                        if (v.sustainLvl < 0.9999f) v.beginSegment (Voice::stDecay, 1.0f, v.sustainLvl, v.kD, v.decInc);
+                        else v.stage = Voice::stSustain;
+                    }
+                    else if (v.stage == Voice::stDecay) v.stage = Voice::stSustain;
+                    else { v.active = false; break; }                          // release finished
+                    if (v.stage == Voice::stSustain && v.sustainLvl < 1.0e-4f) { v.active = false; break; }
+                }
+                else
+                {
+                    const float t = (float) v.segT;
+                    const float sh = std::abs (v.segK) < 1.0e-3f ? t : (std::exp (v.segK * t) - 1.0f) / v.segDen;
+                    v.env = v.segFrom + (v.segTo - v.segFrom) * sh;
+                }
+            }
 
             const float fade = remaining < fadeLen ? (float) (remaining / fadeLen) : 1.0f;
             const float g = v.env * fade;
@@ -831,7 +893,7 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
     }
     if (previewWaiting.exchange (false))
         if (auto pv = std::atomic_load (&pendingPreview))
-            startVoice (pv->sample, nullptr, 0.8f, -1, pv->start, pv->end);
+            startVoice (pv->sample, pv->shaped ? &pv->shape : nullptr, 0.8f * (pv->shaped ? pv->shape.gain : 1.0f), -1, pv->start, pv->end);
 
     // ---- tap chop playback state for this block
     std::shared_ptr<const SampleData> tapS;
@@ -1058,6 +1120,7 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
         rendered = jmax (rendered, hits[i].pos);
         const auto& h = hits[i];
         if (h.track >= 0) { if (h.velocity < 0.0f) releaseKey (h.track, h.pitch); else handleKeyHit (h.track, h.pitch, h.velocity, h.gate); }
+        else if (h.velocity < -1.5f) { for (auto& v : voices) if (v.active && v.pad == h.pad && v.keysTrack < 0) v.noteOff(); }
         else if (h.velocity < 0.0f) padRelease (h.pad);
         else handleHit (h.pad, h.velocity, h.gate);
     }
@@ -1216,6 +1279,12 @@ std::unique_ptr<XmlElement> PadRomplerProcessor::kitToXml() const
         pe->setAttribute ("end", (double) p->end);
         pe->setAttribute ("attack", (double) p->attackMs);
         pe->setAttribute ("decay", (double) p->decayMs);
+        if (p->fadeOutMs > 0.0f) pe->setAttribute ("fadeOut", (double) p->fadeOutMs);
+        pe->setAttribute ("sustain", (double) p->sustain);
+        pe->setAttribute ("release", (double) p->releaseMs);
+        pe->setAttribute ("curveA", (double) p->curveA);
+        pe->setAttribute ("curveD", (double) p->curveD);
+        pe->setAttribute ("curveR", (double) p->curveR);
         pe->setAttribute ("cutoff", (double) p->cutoff);
         pe->setAttribute ("reso", (double) p->reso);
         pe->setAttribute ("reverse", p->reverse);
@@ -1280,6 +1349,7 @@ std::unique_ptr<XmlElement> PadRomplerProcessor::kitToXml() const
         ke->setAttribute ("mono", kt.mono.load());
         ke->setAttribute ("glide", (double) kt.glideMs.load());
         ke->setAttribute ("level", (double) kt.level.load());
+        if (kt.sliceCount.load() > 0) ke->setAttribute ("slices", kt.sliceCount.load());
     }
     return xml;
 }
@@ -1308,6 +1378,17 @@ void PadRomplerProcessor::kitFromXml (const XmlElement& xml)
         st->end = (float) pe->getDoubleAttribute ("end", 1.0);
         st->attackMs = (float) pe->getDoubleAttribute ("attack", 0.0);
         st->decayMs = (float) pe->getDoubleAttribute ("decay", 5000.0);
+        st->fadeOutMs = (float) pe->getDoubleAttribute ("fadeOut", 0.0);
+        if (pe->hasAttribute ("sustain"))
+        {
+            st->sustain = (float) pe->getDoubleAttribute ("sustain", 1.0);
+            st->releaseMs = (float) pe->getDoubleAttribute ("release", 100.0);
+            st->curveA = (float) pe->getDoubleAttribute ("curveA", 0.0);
+            st->curveD = (float) pe->getDoubleAttribute ("curveD", 0.7);
+            st->curveR = (float) pe->getDoubleAttribute ("curveR", 0.8);
+        }
+        else if (st->decayMs >= 4999.0f) st->decayMs = 300.0f;      // kit from before 0.9.8, Decay off: plays the whole region
+        else { st->sustain = 0.0f; st->curveD = 1.0f; }             // old Decay knob: an exponential fade to silence
         st->cutoff = (float) pe->getDoubleAttribute ("cutoff", 20000.0);
         st->reso = (float) pe->getDoubleAttribute ("reso", 0.0);
         st->reverse = pe->getBoolAttribute ("reverse", false);
@@ -1383,6 +1464,7 @@ void PadRomplerProcessor::kitFromXml (const XmlElement& xml)
             kt.mono = ke->getBoolAttribute ("mono", false);
             kt.glideMs = (float) jlimit (0.0, 1000.0, ke->getDoubleAttribute ("glide", 0.0));
             kt.level = (float) jlimit (0.0, 2.0, ke->getDoubleAttribute ("level", 1.0));
+            kt.sliceCount = jlimit (0, PadLayout::numPads, ke->getIntAttribute ("slices", 0));
         }
         currentPattern = jlimit (0, Seq::numPatterns - 1, seq->getIntAttribute ("pattern", 0));
     }

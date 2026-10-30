@@ -152,6 +152,7 @@ private:
     KeysLane* currentLane();               // nullptr while the drums are shown
     int pageCount();
     void syncTrackControls();
+    static constexpr int sliceItemId = 1000;
     void rebuildSoundBox();
     void updateHint();
 };

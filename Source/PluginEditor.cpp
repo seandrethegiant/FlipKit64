@@ -177,7 +177,6 @@ PadsPage::PadsPage (EditorContext& c) : ctx (c), proc (c.getProc())
     addAndMakeVisible (chokeBox);
 
     auto dB  = [] (double v) { return v <= -35.9 ? String ("-inf") : String (v, 1) + " dB"; };
-    auto ms  = [] (double v) { return v < 1000.0 ? String ((int) v) + " ms" : String (v / 1000.0, 2) + " s"; };
     setupKnob (level, -36.0, 12.0, 0.1, 0.0, dB, [] (PadState& p, double v) { p.gain = Decibels::decibelsToGain ((float) v, -36.0f); });
     setupKnob (pan, -1.0, 1.0, 0.01, 0.0,
                [] (double v) { return std::abs (v) < 0.01 ? String ("C") : (v < 0 ? "L" : "R") + String ((int) std::round (std::abs (v) * 100)); },
@@ -190,9 +189,7 @@ PadsPage::PadsPage (EditorContext& c) : ctx (c), proc (c.getProc())
                [] (PadState& p, double v) { p.start = (float) jmin (v, (double) p.end - 0.001); });
     setupKnob (end, 0.0, 1.0, 0.001, 0.0, [] (double v) { return String (v * 100.0, 1) + "%"; },
                [] (PadState& p, double v) { p.end = (float) jmax (v, (double) p.start + 0.001); });
-    setupKnob (attack, 0.0, 2000.0, 1.0, 100.0, ms, [] (PadState& p, double v) { p.attackMs = (float) v; });
-    setupKnob (decay, 10.0, 5000.0, 1.0, 400.0, [ms] (double v) { return v >= 4999.0 ? String ("Off") : ms (v); },
-               [] (PadState& p, double v) { p.decayMs = (float) v; });
+    addAndMakeVisible (envelope);
     setupKnob (cutoff, 20.0, 20000.0, 1.0, 1000.0,
                [] (double v) { return v >= 19999.0 ? String ("Off") : v < 1000.0 ? String ((int) v) + " Hz" : String (v / 1000.0, 1) + " kHz"; },
                [] (PadState& p, double v) { p.cutoff = (float) v; });
@@ -202,7 +199,6 @@ PadsPage::PadsPage (EditorContext& c) : ctx (c), proc (c.getProc())
     pan.slider.setDoubleClickReturnValue (true, 0.0);
     tune.slider.setDoubleClickReturnValue (true, 0.0);
     fine.slider.setDoubleClickReturnValue (true, 0.0);
-    decay.slider.setDoubleClickReturnValue (true, 5000.0);
     cutoff.slider.setDoubleClickReturnValue (true, 20000.0);
 
     for (auto* t : { &reverseToggle, &monoToggle })
@@ -269,14 +265,14 @@ void PadsPage::refreshPanel()
     fine.slider.setValue (pad->fine, dontSendNotification);
     start.slider.setValue (pad->start, dontSendNotification);
     end.slider.setValue (pad->end, dontSendNotification);
-    attack.slider.setValue (pad->attackMs, dontSendNotification);
-    decay.slider.setValue (pad->decayMs, dontSendNotification);
     cutoff.slider.setValue (pad->cutoff, dontSendNotification);
     reso.slider.setValue (pad->reso, dontSendNotification);
     reverseToggle.setToggleState (pad->reverse, dontSendNotification);
     monoToggle.setToggleState (pad->mono, dontSendNotification);
     layerList.updateContent();
     layerList.repaint();
+    envelope.graph.refresh();
+    envelope.refresh();
 }
 
 void PadsPage::tick()
@@ -334,22 +330,24 @@ void PadsPage::resized()
         playLabel.setBounds (row.removeFromLeft (36));
         playBox.setBounds (row);
     }
+    pr.removeFromTop (10);
+    envelope.setBounds (pr.removeFromTop (196));
     pr.removeFromTop (8);
-    Knob* rows[3][4] = { { &level, &pan, &tune, &fine }, { &start, &end, &attack, &decay }, { &cutoff, &reso, nullptr, nullptr } };
-    const int kw = pr.getWidth() / 4, kh = 80;
+    Knob* rows[2][4] = { { &level, &pan, &tune, &fine }, { &start, &end, &cutoff, &reso } };
+    const int kw = pr.getWidth() / 4, kh = 78;
     for (auto& r : rows)
     {
         auto rr = pr.removeFromTop (kh);
-        pr.removeFromTop (6);
-        for (int i = 0; i < 4; ++i)
-        {
-            auto kcell = rr.removeFromLeft (kw);
-            if (r[i] != nullptr) r[i]->setBounds (kcell.reduced (2, 0));
-            else if (i == 2) { reverseToggle.setBounds (kcell.withHeight (24).withY (kcell.getY() + 14)); monoToggle.setBounds (kcell.withHeight (24).withY (kcell.getY() + 40)); }
-        }
+        pr.removeFromTop (4);
+        for (int i = 0; i < 4; ++i) r[i]->setBounds (rr.removeFromLeft (kw).reduced (2, 0));
+    }
+    {
+        auto tr = pr.removeFromTop (24);
+        reverseToggle.setBounds (tr.removeFromLeft (tr.getWidth() / 2));
+        monoToggle.setBounds (tr);
     }
     pr.removeFromTop (6);
-    hint.setBounds (pr.removeFromBottom (44));
+    hint.setBounds (pr.removeFromBottom (30));
     pr.removeFromBottom (6);
     auto btns = pr.removeFromBottom (24);
     const int bw = (btns.getWidth() - 18) / 4;

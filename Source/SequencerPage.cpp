@@ -615,7 +615,8 @@ SequencerPage::SequencerPage (EditorContext& c) : ctx (c), proc (c.getProc())
     soundBox.setTooltip ("The pad this track plays, pitched across the keyboard (it keeps that pad's tuning, envelope and filter)");
     soundBox.onChange = [this]
     {
-        if (selectedTrack <= 0) return;
+        if (selectedTrack <= 0 || soundBox.getSelectedId() == sliceItemId) return;
+        proc.keysTracks[selectedTrack - 1].sliceCount = 0;
         proc.keysTracks[selectedTrack - 1].sourcePad = soundBox.getSelectedId() - 2;
         grid.repaint();
     };
@@ -707,7 +708,15 @@ void SequencerPage::rebuildSoundBox()
     }
     if (selectedTrack > 0)
     {
-        const int src = proc.keysTracks[selectedTrack - 1].sourcePad.load();
+        const auto& kt = proc.keysTracks[selectedTrack - 1];
+        const int src = kt.sourcePad.load();
+        if (const int n = kt.sliceCount.load(); n > 0 && src >= 0)  // slices sent from the Sampler: one pad per key
+        {
+            const int first = PadLayout::noteForPad (src);
+            soundBox.addItem ("Slices: pads " + String (first) + "-" + String (first + n - 1), sliceItemId);
+            soundBox.setSelectedId (sliceItemId, dontSendNotification);
+            return;
+        }
         if (src >= 0 && soundBox.indexOfItemId (src + 2) < 0)      // a pad that's been emptied: still show it
             soundBox.addItem (String (PadLayout::noteForPad (src)) + "  (empty)", src + 2);
         soundBox.setSelectedId (src + 2, dontSendNotification);
