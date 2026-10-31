@@ -266,6 +266,7 @@ void StepGrid::mouseDown (const MouseEvent& e)
     }
     else turnedOn = false;
     selPad = pad; selStep = step;
+    if (ctx.getSelectedPad() != pad) ctx.selectPad (pad);       // the sound you're editing is the one the TempoPAD's steps show
     dragStartVel = pat.vel[pad][step].load();
     owner.stepChanged();
     repaint();
@@ -583,7 +584,7 @@ SequencerPage::SequencerPage (EditorContext& c) : ctx (c), proc (c.getProc())
         pageButtons[i].onClick = [this, i] { followToggle.setToggleState (false, dontSendNotification); setPage (i); };
         addAndMakeVisible (pageButtons[i]);
     }
-    for (auto* t : { &followToggle, &allPadsToggle, &tempoPadToggle })
+    for (auto* t : { &followToggle, &allPadsToggle })
     {
         t->setColour (ToggleButton::textColourId, muted);
         t->setColour (ToggleButton::tickColourId, accent);
@@ -591,10 +592,12 @@ SequencerPage::SequencerPage (EditorContext& c) : ctx (c), proc (c.getProc())
     }
     followToggle.setToggleState (true, dontSendNotification);
     allPadsToggle.onClick = [this] { padsChanged(); };
-    tempoPadToggle.setTooltip ("Let the TempoPAD's mode buttons drive FlipKit64: User mode = step entry for the "
-                               "selected pad, Easy mode = top row picks patterns. Turn MMC on for Play / Stop / Record.");
+    styleButton (tempoPadToggle);
+    addAndMakeVisible (tempoPadToggle);
+    tempoPadToggle.setTooltip ("TempoPAD settings: let its mode buttons drive FlipKit64, light up its pads (in Easy mode), "
+                               "and choose what the pads do in Easy mode. Turn MMC on for Play / Stop / Record.");
     tempoPadToggle.setToggleState (proc.tempoPadModes.load(), dontSendNotification);
-    tempoPadToggle.onClick = [this] { ctx.tempoPadModesChanged (tempoPadToggle.getToggleState()); ctrlModeChanged(); };
+    tempoPadToggle.onClick = [this] { showTempoPadMenu(); };
 
     viewport.setViewedComponent (&grid, false);
     viewport.setScrollBarsShown (true, false);
@@ -829,6 +832,65 @@ void SequencerPage::padsChanged()
     if (selectedTrack > 0) rebuildSoundBox();
 }
 
+void SequencerPage::showTempoPadMenu()
+{
+    PopupMenu m;
+    const bool modes = proc.tempoPadModes.load();
+    const int layout = proc.easyLayout.load();
+    m.addSectionHeader ("TempoPAD");
+    m.addItem (1, "Follow the TempoPAD's mode buttons", true, modes);
+    m.addItem (2, "Light up the pads (in Easy mode)", true, proc.padLights.load());
+    m.addSectionHeader ("In Easy mode the pads...");
+    m.addItem (10, "Top row picks patterns, the rest play", modes, modes && layout == 0);
+    m.addItem (11, "All 64 play sounds", modes, modes && layout == 1);
+    m.addItem (12, "Turn steps on and off for the selected pad", modes, modes && layout == 2);
+    m.addSectionHeader ("Velocity (how hard hits count)");
+    const int vm = proc.velocityMode.load();
+    m.addItem (40, "As played", true, vm == 0);
+    m.addItem (41, "Lighter touch (soft hits count louder)", true, vm == 1);
+    m.addItem (42, "Full level (every hit at full volume)", true, vm == 2);
+    m.addSectionHeader ("Play, Stop and Record buttons");
+    auto describe = [this] (int b)
+    {
+        const int t = proc.transportMsg[b].load();
+        if (t == 0) return String ("MMC only");
+        const int ch = (t >> 8) & 0xFF;
+        if ((t >> 16) == 3) return String ("SysEx ") + String::toHexString (ch) + " " + String::toHexString (t & 0x7F);
+        return String ((t >> 16) == 1 ? "CC " : "note ") + String (t & 0x7F) + (ch > 0 ? ", ch " + String (ch) : String());
+    };
+    m.addItem (20, "Teach Play... (" + describe (PadRomplerProcessor::tbPlay) + ")");
+    m.addItem (21, "Teach Stop... (" + describe (PadRomplerProcessor::tbStop) + ")");
+    m.addItem (22, "Teach Record... (" + describe (PadRomplerProcessor::tbRecord) + ")");
+    m.addItem (23, "Reset the buttons");
+    m.addSeparator();
+    m.addItem (30, "Write a MIDI log (troubleshooting)", true, proc.midiLog.load());
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (&tempoPadToggle), [this, modes] (int r)
+    {
+        if (r >= 20 && r <= 22) { teachButton (r == 20 ? PadRomplerProcessor::tbPlay : r == 21 ? PadRomplerProcessor::tbStop : PadRomplerProcessor::tbRecord); return; }
+        if (r == 23)
+        {
+            proc.transportMsg[0] = PadRomplerProcessor::defaultStopCode; proc.transportMsg[1] = 0; proc.transportMsg[2] = 0;
+            ctx.transportButtonsChanged();
+            return;
+        }
+        if (r >= 40 && r <= 42) { ctx.velocityModeChanged (r - 40); return; }
+        if (r == 30)
+        {
+            const bool on = ! proc.midiLog.load();
+            ctx.midiLogChanged (on);
+            if (on && proc.midiLog.load())
+                AlertWindow::showMessageBoxAsync (MessageBoxIconType::InfoIcon, "MIDI log on",
+                    "Writing to:\n" + ctx.midiLogFile().getFullPathName() + "\n\nPlay the notes that sound wrong, then the same sounds on the Pads tab, "
+                    "then turn the log off in this menu.");
+            return;
+        }
+        if (r == 1) { ctx.tempoPadModesChanged (! modes); ctrlModeChanged(); }
+        else if (r == 2) ctx.padLightsChanged (! proc.padLights.load());
+        else if (r >= 10 && r <= 12) ctx.easyLayoutChanged (r - 10);
+        tempoPadToggle.setToggleState (proc.tempoPadModes.load(), dontSendNotification);
+    });
+}
+
 void SequencerPage::ctrlModeChanged()
 {
     String h = defaultHint;
@@ -872,8 +934,32 @@ void SequencerPage::stepChanged()
     grid.repaint();
 }
 
+void SequencerPage::teachButton (int button)
+{
+    const char* names[] = { "Stop", "Play", "Record" };
+    teaching = button;
+    proc.transportLearn = button;
+    teachWindow = std::make_unique<AlertWindow> ("Teach the " + String (names[button]) + " button",
+        "Press " + String (names[button]) + " on the TempoPAD now.\n\n"
+        "Works in any TempoPAD mode. If MMC is on, the button already works without teaching.",
+        MessageBoxIconType::NoIcon, this);
+    teachWindow->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+    teachWindow->enterModalState (true, ModalCallbackFunction::create ([this] (int)
+    {
+        proc.transportLearn = -1;
+        teaching = -1;
+    }), false);
+}
+
 void SequencerPage::tick()
 {
+    if (teaching >= 0 && teachWindow != nullptr && proc.transportLearn.load() < 0)   // learned
+    {
+        teaching = -1;
+        ctx.transportButtonsChanged();
+        teachWindow->exitModalState (1);
+        teachWindow.reset();
+    }
     proc.keysInput = (isShowing() && selectedTrack > 0 && padsPlayToggle.getToggleState()) ? selectedTrack - 1 : -1;
     proc.drainKeyRecordings();
     if (proc.keysRecorded.load() != lastKeysRecorded) { lastKeysRecorded = proc.keysRecorded.load(); roll.repaint(); velLane.repaint(); grid.repaint(); }
@@ -987,7 +1073,7 @@ void SequencerPage::resized()
     auto pagesRow = area.removeFromTop (26);
     {
         auto pr = pagesRow;
-        tempoPadToggle.setBounds (pr.removeFromRight (140));
+        tempoPadToggle.setBounds (pr.removeFromRight (110).reduced (0, 1)); pr.removeFromRight (10);
         allPadsToggle.setBounds (pr.removeFromRight (130));
         followToggle.setBounds (pr.removeFromRight (140));
         pr = pagesRow;

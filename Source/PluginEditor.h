@@ -1,5 +1,6 @@
 #pragma once
 #include "Common.h"
+#include "SampleSearch.h"
 #include "EnvelopeEditor.h"
 #include "SamplerPage.h"
 #include "SequencerPage.h"
@@ -62,6 +63,7 @@ public:
     void resized() override;
     void refreshPanel();
     void tick();                      // pad flashes
+    void showStatus (const juce::String& message);
     juce::OwnedArray<PadButton> padButtons;
 
 private:
@@ -83,6 +85,8 @@ private:
     juce::TextButton upButton { "Up" }, downButton { "Down" }, removeButton { "Remove" }, clearButton { "Clear pad" };
     juce::Rectangle<int> gridArea, panelArea;
     bool refreshing = false;
+    juce::String defaultHint;
+    juce::uint32 statusAt = 0;
 
     Knob* knobs() { return &level; }
     void setupKnob (Knob&, double min, double max, double interval, double skewMid,
@@ -106,10 +110,24 @@ public:
     int getSelectedPad() const override { return selectedPad; }
     void selectPad (int index) override;
     juce::Array<juce::File> browserSelection() const override;
+    juce::Array<juce::File> browserItems() const override;
+    int fillPads (int startPad, const juce::Array<juce::File>& filesOrFolders, bool wholeKit);   // returns pads filled
+    bool undoFill();
+    void showFolderMenu (const juce::File& folder);
     void dropFiles (int padIndex, const juce::Array<juce::File>& files) override;
     void openInSampler (const juce::File& file) override;
     void tempoPadModesChanged (bool on) override;
     void clearAllRequested() override;
+    void padLightsChanged (bool on) override;
+    void stopAllRequested() override;
+    void easyLayoutChanged (int layout) override;
+    void transportButtonsChanged() override;
+    void velocityModeChanged (int mode) override;
+    void midiLogChanged (bool on) override;
+    juce::File midiLogFile() const override { return logFile; }
+    void drainMidiLog();
+    juce::File logFile;
+    std::unique_ptr<juce::FileOutputStream> logStream;
 
     void showTab (int tab);
     bool keyPressed (const juce::KeyPress&) override;
@@ -127,6 +145,8 @@ private:
 
     PadRomplerProcessor& proc;
     int selectedPad = 0;
+    std::vector<PadPtr> fillUndo;                // the pads before the last fill (Ctrl+Z on the Pads tab)
+    bool smartSort = true;
     int currentTab = 0;
 
     // browser
@@ -155,6 +175,14 @@ private:
     void savePlaces();
     void rebuildPlacesBox();
     juce::ToggleButton previewToggle { "Preview on click" };
+    struct SearchBox : public juce::TextEditor
+    {
+        std::function<bool (const juce::KeyPress&)> onKey;
+        bool keyPressed (const juce::KeyPress& k) override { return (onKey && onKey (k)) || juce::TextEditor::keyPressed (k); }
+    };
+    SearchBox searchBox;
+    SampleSearch search;
+    void updateSearchView();
     juce::Label browserPath;
     std::unique_ptr<juce::FileChooser> chooser;
 

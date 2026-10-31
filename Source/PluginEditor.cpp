@@ -1,4 +1,6 @@
 #include "PluginEditor.h"
+#include "Lights.h"
+#include "KitFill.h"
 
 using namespace juce;
 using namespace UI;
@@ -81,7 +83,7 @@ void PadButton::filesDropped (const StringArray& files, int, int)
 {
     dragOver = false;
     Array<File> fs;
-    for (auto& f : files) { File file (f); if (file.existsAsFile()) fs.add (file); }
+    for (auto& f : files) { File file (f); if (file.existsAsFile() || file.isDirectory()) fs.add (file); }
     ctx.dropFiles (index, fs);
 }
 
@@ -93,7 +95,7 @@ bool PadButton::isInterestedInDragSource (const SourceDetails& d)
 void PadButton::itemDropped (const SourceDetails&)
 {
     dragOver = false;
-    ctx.dropFiles (index, ctx.browserSelection());
+    ctx.dropFiles (index, ctx.browserItems());
 }
 
 // ===================================================================================== LayerList
@@ -166,7 +168,7 @@ PadsPage::PadsPage (EditorContext& c) : ctx (c), proc (c.getProc())
     addAndMakeVisible (playBox);
     for (auto* b : { &stopAllButton, &clearAllButton }) { styleButton (*b); addAndMakeVisible (b); }
     stopAllButton.setTooltip ("Stop every sound that's still playing (Esc)");
-    stopAllButton.onClick = [this] { proc.stopAllSounds(); };
+    stopAllButton.onClick = [this] { ctx.stopAllRequested(); };
     clearAllButton.setTooltip ("Clear all the pads, or start a new kit (you can save first)");
     clearAllButton.onClick = [this] { ctx.clearAllRequested(); };
     chokeBox.addItem ("Off", 1);
@@ -223,8 +225,9 @@ PadsPage::PadsPage (EditorContext& c) : ctx (c), proc (c.getProc())
     removeButton.onClick = [this] { proc.removeLayer (ctx.getSelectedPad(), layerList.getSelectedRow()); };
     clearButton.onClick  = [this] { proc.clearPad (ctx.getSelectedPad()); };
 
-    hint.setText ("Drop one sample to replace a pad; drop several (or hold Shift) to add layers. "
-                  "Click a pad to hear it (lower = softer).", dontSendNotification);
+    defaultHint = "Drop a sample on a pad to replace it. Drop several, or a folder, to fill pads from there "
+                  "(Shift+drop adds layers instead). Right-click a folder in the browser to load it as a kit.";
+    hint.setText (defaultHint, dontSendNotification);
     styleLabel (hint, 11.0f);
     hint.setJustificationType (Justification::topLeft);
     addAndMakeVisible (hint);
@@ -275,8 +278,21 @@ void PadsPage::refreshPanel()
     envelope.refresh();
 }
 
+void PadsPage::showStatus (const String& message)
+{
+    hint.setText (message, dontSendNotification);
+    hint.setColour (Label::textColourId, accent);
+    statusAt = Time::getMillisecondCounter();
+}
+
 void PadsPage::tick()
 {
+    if (statusAt != 0 && Time::getMillisecondCounter() - statusAt > 8000)
+    {
+        hint.setText (defaultHint, dontSendNotification);
+        hint.setColour (Label::textColourId, muted);
+        statusAt = 0;
+    }
     for (auto* b : padButtons)
     {
         const auto h = proc.hitCounter[b->index].load (std::memory_order_relaxed);
@@ -466,6 +482,39 @@ PadRomplerEditor::PadRomplerEditor (PadRomplerProcessor& p)
     addAndMakeVisible (previewToggle);
     styleLabel (browserPath, 11.0f);
     addAndMakeVisible (browserPath);
+
+    // ---- search: every sample in this location and its folders
+    searchBox.setTextToShowWhenEmpty ("Search samples (Ctrl+F)", muted);
+    searchBox.setTooltip ("Type words from the name or folder, e.g. \"808 kick\". Enter or double-click puts it on the selected pad, "
+                          "drag it to any pad, Esc clears.");
+    searchBox.setFont (Font (13.5f));
+    searchBox.setIndents (8, 4);
+    searchBox.onTextChange = [this] { search.setQuery (searchBox.getText()); updateSearchView(); };
+    searchBox.onEscapeKey = [this] { searchBox.clear(); search.setQuery ({}); updateSearchView(); };
+    searchBox.onReturnKey = [this] { search.selectFirst(); };
+    searchBox.onKey = [this] (const KeyPress& k)
+    {
+        if (k == KeyPress::downKey && search.active() && search.numResults() > 0)   // into the results
+        {
+            if (auto* lb = dynamic_cast<ListBox*> (search.getChildComponent (0)))
+            {
+                lb->grabKeyboardFocus();
+                if (lb->getSelectedRow() < 0) lb->selectRow (0);
+            }
+            return true;
+        }
+        return false;
+    };
+    addAndMakeVisible (searchBox);
+    addChildComponent (search);
+    search.onPreview = [this] (const File& f) { if (previewToggle.getToggleState()) previewNow (f); };
+    search.onOpen = [this] (const File& f) { fileDoubleClicked (f); };
+    search.onStatusChanged = [this] { updateSearchView(); };
+    search.onShowInFolder = [this] (const File& f)
+    {
+        searchBox.clear(); search.setQuery ({}); updateSearchView();
+        fileTree.setSelectedFile (f);
+    };
     setBrowserRoot (proc.browserRoot);
 
     // ---- pages & tabs
@@ -512,7 +561,15 @@ PadRomplerEditor::PadRomplerEditor (PadRomplerProcessor& p)
         sequencerPage.padsChanged();
     };
 
+    if (proc.lights != nullptr) proc.lights->samplerInfo = [this] { return samplerPage.lightInfo(); };
     proc.tempoPadModes = settings->getBoolValue ("tempoPadModes", true);
+    proc.padLights = settings->getBoolValue ("padLights", true);
+    proc.velocityMode = jlimit (0, 2, settings->getIntValue ("velocityMode", 0));
+    proc.transportMsg[PadRomplerProcessor::tbStop]   = settings->getIntValue ("transportStop", PadRomplerProcessor::defaultStopCode);
+    proc.transportMsg[PadRomplerProcessor::tbPlay]   = settings->getIntValue ("transportPlay", 0);
+    proc.transportMsg[PadRomplerProcessor::tbRecord] = settings->getIntValue ("transportRecord", 0);
+    smartSort = settings->getBoolValue ("smartSort", true);
+    proc.easyLayout = jlimit (0, 2, settings->getIntValue ("easyLayout", 0));
     styleLabel (ctrlLabel, 11.0f, accent);
     ctrlLabel.setFont (Font (11.0f, Font::bold));
     ctrlLabel.setJustificationType (Justification::centred);
@@ -530,6 +587,9 @@ PadRomplerEditor::PadRomplerEditor (PadRomplerProcessor& p)
 PadRomplerEditor::~PadRomplerEditor()
 {
     proc.onPadsChanged = nullptr;
+    proc.samplerView = false;
+    if (logStream != nullptr) midiLogChanged (false);
+    if (proc.lights != nullptr) proc.lights->samplerInfo = nullptr;
     fileTree.removeListener (this);
     scanThread.stopThread (2000);
 }
@@ -540,6 +600,7 @@ void PadRomplerEditor::showTab (int tab)
     padsPage.setVisible (tab == 0);
     samplerPage.setVisible (tab == 1);
     sequencerPage.setVisible (tab == 2);
+    proc.samplerView = tab == 1;
     for (int i = 0; i < 3; ++i) tabButtons[i].setToggleState (i == tab, dontSendNotification);
     if (tab == 2) sequencerPage.padsChanged();
 }
@@ -632,12 +693,41 @@ void PadRomplerEditor::setBrowserRoot (const File& f)
     }
     else browserPath.setText (f.getFullPathName() + "  (not found - click Folder...)", dontSendNotification);
     fileTree.refresh();
+    search.setRoot (f);
+    updateSearchView();
+}
+
+void PadRomplerEditor::updateSearchView()
+{
+    searchBox.setEnabled (! netActive);
+    searchBox.setTextToShowWhenEmpty (netActive ? "Search works in folders on this computer" : "Search samples (Ctrl+F)", muted);
+    const bool searching = search.active() && ! netActive;
+    search.setVisible (searching);
+    fileTree.setVisible (! netActive && ! searching);
+    netBrowser.setVisible (netActive);
+    if (searching) browserPath.setText (search.status(), dontSendNotification);
+    else if (netActive) browserPath.setText (netBrowser.currentDisplayPath(), dontSendNotification);
+    else if (proc.browserRoot.isDirectory()) browserPath.setText (proc.browserRoot.getFullPathName(), dontSendNotification);
+}
+
+Array<File> PadRomplerEditor::browserItems() const
+{
+    if (netActive) return browserSelection();
+    if (search.isVisible()) return search.selectedFiles();
+    Array<File> fs;
+    for (int i = 0; i < fileTree.getNumSelectedFiles(); ++i)
+    {
+        auto f = fileTree.getSelectedFile (i);
+        if (f.existsAsFile() || f.isDirectory()) fs.add (f);
+    }
+    return fs;
 }
 
 Array<File> PadRomplerEditor::browserSelection() const
 {
     if (netActive)                               // network: download (if needed) and hand over the local copies
         return const_cast<NetBrowser&> (netBrowser).selectedFilesNow();
+    if (search.isVisible()) return search.selectedFiles();
     Array<File> fs;
     for (int i = 0; i < fileTree.getNumSelectedFiles(); ++i)
     {
@@ -650,9 +740,79 @@ Array<File> PadRomplerEditor::browserSelection() const
 void PadRomplerEditor::dropFiles (int padIndex, const Array<File>& files)
 {
     if (files.isEmpty()) return;
-    const bool append = ModifierKeys::getCurrentModifiersRealtime().isShiftDown();
-    proc.assignFiles (padIndex, files, append);
-    selectPad (padIndex);
+    const bool shift = ModifierKeys::getCurrentModifiersRealtime().isShiftDown();
+    const bool anyFolder = std::any_of (files.begin(), files.end(), [] (const File& f) { return f.isDirectory(); });
+    if (shift || (files.size() == 1 && ! anyFolder))        // one sample replaces the pad; Shift adds layers
+    {
+        Array<File> audio = KitFill::audioFiles (files);
+        if (audio.isEmpty()) return;
+        proc.assignFiles (padIndex, audio, shift);
+        selectPad (padIndex);
+        return;
+    }
+    fillPads (padIndex, files, false);                       // several samples or a folder: fill pads from here
+}
+
+int PadRomplerEditor::fillPads (int startPad, const Array<File>& filesOrFolders, bool wholeKit)
+{
+    auto audio = KitFill::audioFiles (filesOrFolders);
+    if (audio.isEmpty()) { padsPage.showStatus ("No samples found there"); return 0; }
+    const auto slots = KitFill::layout (audio, smartSort, wholeKit);
+    const auto order = UI::padsByNote();
+    const int startPos = (int) (std::find (order.begin(), order.end(), startPad) - order.begin());
+
+    fillUndo.clear();
+    for (int i = 0; i < PadLayout::numPads; ++i) fillUndo.push_back (proc.getPad (i));
+    if (wholeKit) proc.clearAllPads();
+
+    int filled = 0, left = 0, first = -1, last = -1;
+    for (int k = 0; k < slots.size(); ++k)
+    {
+        if (slots[k] == File()) continue;
+        if (startPos + k >= (int) order.size()) { ++left; continue; }
+        const int pad = order[(size_t) (startPos + k)];
+        proc.assignFiles (pad, { slots[k] }, false);
+        const auto name = KitFill::padName (slots[k]);
+        proc.updatePad (pad, [name] (PadState& p) { p.name = name; });
+        if (first < 0) first = pad;
+        last = pad; ++filled;
+    }
+    selectPad (first >= 0 ? first : startPad);
+    String msg = String (filled) + (filled == 1 ? " sample" : " samples") + " on pads "
+               + String (PadLayout::noteForPad (first >= 0 ? first : startPad)) + "-" + String (PadLayout::noteForPad (last >= 0 ? last : startPad));
+    if (left > 0) msg << " (" << left << " didn't fit)";
+    msg << ". Ctrl+Z puts the pads back.";
+    padsPage.showStatus (msg);
+    return filled;
+}
+
+bool PadRomplerEditor::undoFill()
+{
+    if (fillUndo.size() != (size_t) PadLayout::numPads) return false;
+    for (int i = 0; i < PadLayout::numPads; ++i) proc.setPad (i, fillUndo[(size_t) i]);
+    fillUndo.clear();
+    padsPage.showStatus ("Pads put back as they were");
+    return true;
+}
+
+void PadRomplerEditor::showFolderMenu (const File& folder)
+{
+    PopupMenu m;
+    m.addSectionHeader (folder.getFileName());
+    m.addItem (1, "Load folder as kit (replaces the pads)");
+    m.addItem (2, "Fill pads from the selected pad (" + String (PadLayout::noteForPad (selectedPad)) + ")");
+    m.addSeparator();
+    m.addItem (3, "Sort by sound type (kicks, snares, hats... each on its own row)", true, smartSort);
+    m.showMenuAsync (PopupMenu::Options(), [this, folder] (int r)
+    {
+        if (r == 1) { fillPads (UI::padsByNote().front(), { folder }, true); showTab (0); }
+        else if (r == 2) { fillPads (selectedPad, { folder }, false); showTab (0); }
+        else if (r == 3)
+        {
+            smartSort = ! smartSort;
+            if (settings != nullptr) { settings->setValue ("smartSort", smartSort); settings->saveIfNeeded(); }
+        }
+    });
 }
 
 void PadRomplerEditor::openInSampler (const File& file)
@@ -685,6 +845,7 @@ void PadRomplerEditor::selectionChanged()
 
 void PadRomplerEditor::fileClicked (const File& f, const MouseEvent& e)
 {
+    if (e.mods.isPopupMenu() && f.isDirectory()) { showFolderMenu (f); return; }
     // Clicking the selected sample again plays it again (quick drum-hit auditioning).
     if (! previewToggle.getToggleState() || ! f.existsAsFile() || e.mods.isAnyModifierKeyDown()) return;
     if (f == lastPreviewed && Time::getMillisecondCounter() - lastPreviewMs < 250) return;   // just played by the selection change
@@ -755,6 +916,151 @@ void PadRomplerEditor::tempoPadModesChanged (bool on)
     updateCtrlLabel();
 }
 
+void PadRomplerEditor::stopAllRequested()
+{
+    previewStrip.stop();
+    samplerPage.stopAuditions();
+    proc.stopAllSounds();
+}
+
+void PadRomplerEditor::padLightsChanged (bool on)
+{
+    proc.padLights = on;
+    if (settings != nullptr) { settings->setValue ("padLights", on); settings->saveIfNeeded(); }
+}
+
+void PadRomplerEditor::easyLayoutChanged (int layout)
+{
+    proc.easyLayout = jlimit (0, 2, layout);
+    if (settings != nullptr) { settings->setValue ("easyLayout", proc.easyLayout.load()); settings->saveIfNeeded(); }
+}
+
+void PadRomplerEditor::velocityModeChanged (int mode)
+{
+    proc.velocityMode = jlimit (0, 2, mode);
+    if (settings != nullptr) { settings->setValue ("velocityMode", proc.velocityMode.load()); settings->saveIfNeeded(); }
+}
+
+void PadRomplerEditor::transportButtonsChanged()
+{
+    if (settings == nullptr) return;
+    const char* keys[] = { "transportStop", "transportPlay", "transportRecord" };
+    for (int b = 0; b < PadRomplerProcessor::numTransportButtons; ++b) settings->setValue (keys[b], proc.transportMsg[b].load());
+    settings->saveIfNeeded();
+}
+
+void PadRomplerEditor::midiLogChanged (bool on)
+{
+    if (! on)
+    {
+        drainMidiLog();
+        proc.midiLog = false;
+        if (logStream != nullptr) { logStream->writeText ("--- log stopped\n", false, false, "\n"); logStream->flush(); }
+        logStream.reset();
+        return;
+    }
+    // Next to FlipKit64.exe when it can write there (the standalone), else in Documents.
+    auto dir = File::getSpecialLocation (File::currentExecutableFile).getParentDirectory();
+    logFile = dir.getChildFile ("FlipKit64 MIDI log.txt");
+    if (! dir.hasWriteAccess() || PluginHostType::getPluginLoadedAs() != AudioProcessor::wrapperType_Standalone)
+        logFile = File::getSpecialLocation (File::userDocumentsDirectory).getChildFile ("FlipKit64 MIDI log.txt");
+    logFile.getParentDirectory().createDirectory();
+    logFile.deleteFile();
+    logStream = std::make_unique<FileOutputStream> (logFile);
+    if (logStream->failedToOpen()) { logStream.reset(); return; }
+    logStream->writeText ("FlipKit64 MIDI log, " + Time::getCurrentTime().toString (true, true) + ", " + String (proc.logRate(), 0) + " Hz\n"
+                          , false, false, "\n");
+    {   // the settings that decide how Keys notes sound
+        String ctx;
+        const char* modes[] = { "One-shot", "Hold", "Toggle" };
+        for (int t = 0; t < Keys::numTracks; ++t)
+        {
+            auto& kt = proc.keysTracks[t];
+            const int src = kt.sourcePad.load();
+            ctx << "Keys " << (t + 1) << " (" << kt.name << "): ";
+            if (src < 0) { ctx << "no sound\n"; continue; }
+            ctx << "pad " << PadLayout::noteForPad (src) << ", root " << kt.root.load() << ", slices " << kt.sliceCount.load()
+                << ", mono " << (kt.mono.load() ? "on" : "off") << ", glide " << kt.glideMs.load() << " ms, level " << kt.level.load() << "\n";
+            const int nPads = jmax (1, kt.sliceCount.load());
+            for (int k = 0; k < jmin (nPads, 8); ++k)
+            {
+                const int pi = PadLayout::padForNote (PadLayout::noteForPad (src) + k);
+                if (pi < 0) break;
+                if (auto p = proc.getPad (pi); p != nullptr && ! p->layers.empty())
+                    ctx << "    pad " << PadLayout::noteForPad (pi) << " \"" << p->name << "\": " << modes[jlimit (0, 2, (int) p->play)]
+                        << ", gain " << String (p->gain, 2) << ", attack " << p->attackMs << " decay " << p->decayMs << " sustain " << String (p->sustain, 2)
+                        << " release " << p->releaseMs << " ms, layers " << (int) p->layers.size() << ", mono " << (p->mono ? "on" : "off")
+                        << ", choke " << p->choke << "\n";
+            }
+        }
+        ctx << "Pads play Keys track: " << (proc.keysInput.load() >= 0 ? String (proc.keysInput.load() + 1) : String ("none (drums)")) << "\n\ntime (s)  what\n";
+        logStream->writeText (ctx, false, false, "\n");
+    }
+    while (proc.logFifo.getNumReady() > 0) { int s1, n1, s2, n2; proc.logFifo.prepareToRead (proc.logFifo.getNumReady(), s1, n1, s2, n2); proc.logFifo.finishedRead (n1 + n2); }
+    proc.midiLog = true;
+}
+
+void PadRomplerEditor::drainMidiLog()
+{
+    if (logStream == nullptr) return;
+    auto& f = proc.logFifo;
+    const int ready = f.getNumReady();
+    if (ready <= 0) return;
+    int s1, n1, s2, n2;
+    f.prepareToRead (ready, s1, n1, s2, n2);
+    const double rate = jmax (1.0, proc.logRate());
+    auto who = [] (const PadRomplerProcessor::LogEvent& e)
+    {
+        if (e.track >= 0) return "Keys " + String (e.track + 1);
+        if (e.pad >= 0) return "pad " + String (PadLayout::noteForPad (e.pad));
+        return String ("preview");
+    };
+    auto line = [&] (const PadRomplerProcessor::LogEvent& e)
+    {
+        String t = String (e.clock / rate, 3).paddedLeft (' ', 9) + "  ";
+        using E = PadRomplerProcessor::LogEvent;
+        switch (e.kind)
+        {
+            case E::midi:
+            {
+                String hex;
+                for (int k = 0; k < jmin (3, e.size); ++k) hex << String::toHexString (e.bytes[k]).paddedLeft ('0', 2).toUpperCase() << " ";
+                const int st = e.bytes[0] & 0xF0, ch = (e.bytes[0] & 0x0F) + 1;
+                String what;
+                if (e.bytes[0] == 0xF0) what = "SysEx, " + String (e.size) + " bytes";
+                else if (st == 0x90 && e.bytes[2] > 0) what = "note on   ch " + String (ch) + "  note " + String (e.bytes[1]) + "  velocity " + String (e.bytes[2]);
+                else if (st == 0x80 || st == 0x90) what = "note off  ch " + String (ch) + "  note " + String (e.bytes[1]);
+                else if (st == 0xA0) what = "pressure  ch " + String (ch) + "  note " + String (e.bytes[1]) + "  " + String (e.bytes[2]);
+                else if (st == 0xB0) what = "CC        ch " + String (ch) + "  " + String (e.bytes[1]) + " = " + String (e.bytes[2]);
+                else if (st == 0xD0) what = "channel pressure ch " + String (ch) + "  " + String (e.bytes[1]);
+                else if (st == 0xE0) what = "pitch bend ch " + String (ch);
+                return t + "MIDI   " + hex.paddedRight (' ', 10) + what;
+            }
+            case E::soundStart:
+                return t + "  sound starts   " + who (e) + "  volume " + String (e.a, 3)
+                     + (std::abs (e.b) > 0.01f ? "  pitch " + String (e.b, 1) : String())
+                     + (e.gate < 0 ? "  (until let go)" : e.gate > 0 ? "  (for " + String (roundToInt (e.gate / rate * 1000.0)) + " ms)" : "  (one-shot)");
+            case E::soundRelease:
+                return t + "  sound let go   " + who (e) + "  after " + String (roundToInt (e.a * 1000.0f)) + " ms, level " + String (e.b, 2)
+                     + (e.how == 2 ? "  (quick fade: stopped, choked or cut by the next note)" : "  (release)");
+            case E::soundEnd:
+            {
+                const char* how[] = { "reached the end of the sample", "release finished", "faded out after being cut", "decayed to silence" };
+                return t + "  sound ends     " + who (e) + "  after " + String (roundToInt (e.a * 1000.0f)) + " ms  (" + how[jlimit (0, 3, e.how)] + ")";
+            }
+            case E::soundStolen:
+                return t + "  sound CUT OFF  " + who (e) + "  after " + String (roundToInt (e.a * 1000.0f)) + " ms  (out of voices: a new sound took its place)";
+            default: return t + "?";
+        }
+    };
+    String out;
+    for (int i = 0; i < n1; ++i) out << line (proc.logBuf[s1 + i]) << "\n";
+    for (int i = 0; i < n2; ++i) out << line (proc.logBuf[s2 + i]) << "\n";
+    f.finishedRead (n1 + n2);
+    logStream->writeText (out, false, false, "\n");
+    logStream->flush();
+}
+
 void PadRomplerEditor::updateCtrlLabel()
 {
     String t;
@@ -772,6 +1078,7 @@ void PadRomplerEditor::updateCtrlLabel()
 void PadRomplerEditor::timerCallback()
 {
     sequencerPage.historyTick();
+    drainMidiLog();
     // Follow the TempoPAD's mode buttons: User/Easy open the sequencer, Drum goes back.
     const int mode = proc.ctrlMode.load();
     if (mode != lastCtrlMode)
@@ -787,6 +1094,9 @@ void PadRomplerEditor::timerCallback()
         updateCtrlLabel();
         sequencerPage.ctrlModeChanged();
     }
+    // Steps picked on the TempoPAD (Easy mode's bottom half): the screen follows
+    if (mode == PadRomplerProcessor::ctrlSteps && proc.tempoPadModes.load() && proc.stepTarget.load() != selectedPad)
+        selectPad (proc.stepTarget.load());
     previewStrip.tick();
     if (padsPage.isVisible()) padsPage.tick();
     samplerPage.tick();
@@ -842,6 +1152,8 @@ void PadRomplerEditor::resized()
     previewToggle.setBounds (bTop.removeFromRight (124));
     bTop.removeFromRight (6);
     placesBox.setBounds (bTop);
+    br.removeFromTop (6);
+    searchBox.setBounds (br.removeFromTop (26));
     br.removeFromTop (4);
     browserPath.setBounds (br.removeFromTop (18));
     br.removeFromTop (4);
@@ -849,10 +1161,17 @@ void PadRomplerEditor::resized()
     br.removeFromBottom (4);
     fileTree.setBounds (br);
     netBrowser.setBounds (br);
+    search.setBounds (br);
 }
 
 bool PadRomplerEditor::keyPressed (const KeyPress& key)
 {
+    if (key.getModifiers().isCommandDown() && (key.getKeyCode() == 'F' || key.getKeyCode() == 'f') && ! netActive)
+    {
+        searchBox.grabKeyboardFocus();
+        searchBox.selectAll();
+        return true;
+    }
     if (key == KeyPress::spaceKey)
     {
         // Space plays / pauses; if the selected file isn't the one in the player, load it first.
@@ -864,10 +1183,11 @@ bool PadRomplerEditor::keyPressed (const KeyPress& key)
             previewStrip.togglePlay();
         return true;
     }
-    if (key == KeyPress::escapeKey) { previewStrip.stop(); proc.stopAllSounds(); return true; }
+    if (key == KeyPress::escapeKey) { previewStrip.stop(); samplerPage.stopAuditions(); proc.stopAllSounds(); return true; }
     const auto cmd = key.getModifiers().isCommandDown();
     if (cmd && (key.getKeyCode() == 'Z' || key.getKeyCode() == 'z'))
     {
+        if (currentTab == 0 && ! key.getModifiers().isShiftDown() && undoFill()) return true;   // Pads tab: undo the last fill
         if (key.getModifiers().isShiftDown()) sequencerPage.redo(); else sequencerPage.undo();
         return true;
     }
@@ -886,6 +1206,7 @@ void PadRomplerEditor::showNetPlace (const String& key)
     netBrowser.setLocation (l);
     browserPath.setText (netBrowser.currentDisplayPath(), dontSendNotification);
     rebuildPlacesBox();
+    updateSearchView();
 }
 
 void PadRomplerEditor::openNetworkDialog (const Net::Location& prefill, bool editing)

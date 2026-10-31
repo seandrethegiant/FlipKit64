@@ -1,5 +1,6 @@
 #pragma once
 #include "Common.h"
+#include "Lights.h"
 
 // Waveform with slice markers. Click = select and hear the slice under the mouse,
 // double-click = add a marker, drag a marker = move it, right-click a marker = delete it,
@@ -107,6 +108,9 @@ public:
     void undo();
     void redo();
     juce::String status() const { return sliceInfo.getText(); }
+    Lights::SamplerInfo lightInfo() const;   // what the TempoPAD shows while this tab is open
+    void padPressed (int pad);
+    void stopAuditions();                    // Esc / Stop sounds: also stops "Loop the selected slice"               // a TempoPAD pad in Easy mode: hear and select its slice
 
 private:
     EditorContext& ctx;
@@ -167,6 +171,8 @@ private:
 
     // tap chop
     int pendingPad = -1, tapCount = 0;
+    std::vector<int> tappedPads;
+    uint32_t lastPresses = 0;
     double pendingStart = 0.0;
     bool wasTapping = false;
     void startStopTap();

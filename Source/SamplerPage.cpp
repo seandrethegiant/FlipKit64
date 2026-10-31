@@ -1180,6 +1180,7 @@ void SamplerPage::startStopTap()
     if (isPositiveAndBelow (wave.selectedSlice, (int) sl.size())) start = sl[(size_t) wave.selectedSlice].first;
     pendingPad = -1;
     tapCount = 0;
+    tappedPads.clear();
     proc.tapMode = tapModeBox.getSelectedId() - 1;
     if (proc.tapMode.load() == PadRomplerProcessor::tapMarkers) pushUndo();
     proc.startTap (s, start);
@@ -1204,6 +1205,7 @@ void SamplerPage::handleTap (int pad, double pos)
             proc.assignRegion (pendingPad, s, (float) (pendingStart / len), (float) (pos / len), proc.getPad (pendingPad)->name);
         pendingPad = pad;
         pendingStart = pos;
+        tappedPads.push_back (pad);
         proc.assignRegion (pad, s, (float) (pos / len), 1.0f, base + " tap " + String (++tapCount));
         ctx.selectPad (pad);
         tapInfo.setText (String (tapCount) + " pads chopped - keep going or press Stop", dontSendNotification);
@@ -1231,8 +1233,51 @@ void SamplerPage::finishTap()
     pendingPad = -1;
 }
 
+Lights::SamplerInfo SamplerPage::lightInfo() const
+{
+    Lights::SamplerInfo si;
+    si.active = isVisible();
+    if (! si.active) return si;
+    si.tapping = proc.tapPlaying.load();
+    if (si.tapping)
+    {
+        si.tapProgress = wave.length() > 0 ? (float) jlimit (0.0, 1.0, proc.tapPos.load() / wave.length()) : 0.0f;
+        for (int p : tappedPads) if (isPositiveAndBelow (p, PadLayout::numPads)) si.tapped[p] = true;
+        return si;
+    }
+    if (wave.getSample() == nullptr) return si;
+    const auto pads = targetPads();
+    const int n = (int) wave.slices().size();
+    for (int i = 0; i < n && i < (int) pads.size(); ++i)
+    {
+        si.slice[pads[(size_t) i]] = i;
+        si.assigned[pads[(size_t) i]] = i < (int) assigned.size() && assigned[(size_t) i] == pads[(size_t) i];
+    }
+    si.selectedSlice = wave.selectedSlice;
+    return si;
+}
+
+void SamplerPage::stopAuditions()
+{
+    loopToggle.setToggleState (false, dontSendNotification);
+    if (proc.tapPlaying.load()) proc.stopTap();
+}
+
+void SamplerPage::padPressed (int pad)
+{
+    const auto pads = targetPads();
+    const int n = wave.getSample() != nullptr ? (int) wave.slices().size() : 0;
+    for (int i = 0; i < n && i < (int) pads.size(); ++i)
+        if (pads[(size_t) i] == pad) { selectSlice (i, true); return; }
+    proc.triggerPad (pad, 0.8f);                          // not a slice: just play the pad
+}
+
 void SamplerPage::tick()
 {
+    {   // TempoPAD pads pressed in Easy mode while this tab is open
+        const auto presses = proc.samplerPresses.load();
+        if (presses != lastPresses) { lastPresses = presses; if (isVisible()) padPressed (proc.samplerPressPad.load()); }
+    }
     const int st = proc.recState.load();
     const double rate = proc.getHostRate();
     switch (st)

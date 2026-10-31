@@ -115,7 +115,12 @@ private:
     juce::ComboBox lengthBox, resBox;
     juce::TextButton patButtons[Seq::numPatterns];
     juce::TextButton pageButtons[4];
-    juce::ToggleButton followToggle { "Follow playhead" }, allPadsToggle { "Show all pads" }, tempoPadToggle { "TempoPAD modes" };
+    juce::ToggleButton followToggle { "Follow playhead" }, allPadsToggle { "Show all pads" };
+    juce::TextButton tempoPadToggle { "TempoPAD..." };     // menu: modes on/off, pad lights, what Easy mode's pads do
+    void showTempoPadMenu();
+    void teachButton (int button);               // Play / Stop / Record: press it on the TempoPAD
+    std::unique_ptr<juce::AlertWindow> teachWindow;
+    int teaching = -1;
     juce::uint32 lastStepEdits = 0;
     juce::String defaultHint;
     StepGrid grid { ctx, *this };

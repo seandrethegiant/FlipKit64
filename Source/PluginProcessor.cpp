@@ -1,4 +1,5 @@
 #include "PluginProcessor.h"
+#include "Lights.h"
 #include "Network.h"
 #include "PluginEditor.h"
 #include <cstdlib>
@@ -36,6 +37,8 @@ PadRomplerProcessor::PadRomplerProcessor()
 
     browserRoot = File::getSpecialLocation (File::userMusicDirectory);
     startTimer (500);
+    if (MessageManager::getInstanceWithoutCreating() != nullptr)
+        lights = std::make_unique<PadLights> (*this);      // TempoPAD pad colours (Easy mode)
 
    #if FLIPKIT_DEV
     // Developer hook: load a kit at startup (used for automated UI checks only).
@@ -46,7 +49,7 @@ PadRomplerProcessor::PadRomplerProcessor()
    #endif
 }
 
-PadRomplerProcessor::~PadRomplerProcessor() { stopTimer(); }
+PadRomplerProcessor::~PadRomplerProcessor() { lights.reset(); stopTimer(); }
 
 bool PadRomplerProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
@@ -438,6 +441,7 @@ bool PadRomplerProcessor::armRecording (double maxSeconds)
     recBuffer.setSize (2, (int) (jlimit (1.0, 600.0, maxSeconds) * recRate), false, true, false);
     recBuffer.clear();
     recPos = 0;
+    recMax = jmax (1, recBuffer.getNumSamples());
     recState = recArmed;
     return true;
 }
@@ -523,6 +527,11 @@ PadRomplerProcessor::Voice* PadRomplerProcessor::startVoice (const SamplePtr& s,
             const float score = cand.releasing ? -1.0f : cand.env;
             if (score < best) { best = score; v = &cand; }
         }
+        if (v != nullptr)
+        {
+            LogEvent e; e.clock = sampleClock; e.kind = LogEvent::soundStolen; e.track = v->keysTrack; e.pad = v->pad;
+            e.a = (float) ((sampleClock - v->startedAt) / hostRate); e.b = v->env; logEvent (e);
+        }
     }
 
     v->sample = s;           // copy (refcount++) — never the last owner, cache holds one too
@@ -567,6 +576,12 @@ PadRomplerProcessor::Voice* PadRomplerProcessor::startVoice (const SamplePtr& s,
         v->ic1[0] = v->ic1[1] = v->ic2[0] = v->ic2[1] = 0.0f;
     }
     v->active = true;
+    v->startedAt = sampleClock;
+    v->loggedRelease = false;
+    {
+        LogEvent e; e.clock = sampleClock; e.kind = LogEvent::soundStart; e.track = keysTrack; e.pad = padIndex;
+        e.a = gain; e.b = (float) semis; e.gate = gate; logEvent (e);
+    }
     return v;
 }
 
@@ -575,6 +590,18 @@ void PadRomplerProcessor::padRelease (int padIndex)
     for (auto& v : voices)
         if (v.active && ! v.releasing && v.pad == padIndex && v.keysTrack < 0 && v.gateLeft < 0)
             v.noteOff();
+}
+
+int PadRomplerProcessor::chooseLayer (int padIndex, const PadState& pad, float velocity)
+{
+    const int n = (int) pad.layers.size();
+    switch (pad.mode)
+    {
+        case LayerMode::RoundRobin: return rrIndex[padIndex]++ % n;
+        case LayerMode::Velocity:   return jlimit (0, n - 1, (int) (velocity * (float) n * 0.9999f));
+        case LayerMode::Random:     return rng.nextInt (n);
+    }
+    return 0;
 }
 
 void PadRomplerProcessor::handleHit (int padIndex, float velocity, int64 gate)
@@ -590,14 +617,7 @@ void PadRomplerProcessor::handleHit (int padIndex, float velocity, int64 gate)
     }
     // Hold pads: a given gate (sequencer steps, auditions) or held until the pad is let go; others play out
     gate = pad->play != PlayMode::Hold ? 0 : (gate == 0 ? -1 : gate);
-    const int n = (int) pad->layers.size();
-    int which = 0;
-    switch (pad->mode)
-    {
-        case LayerMode::RoundRobin: which = rrIndex[padIndex]++ % n; break;
-        case LayerMode::Velocity:   which = jlimit (0, n - 1, (int) (velocity * (float) n * 0.9999f)); break;
-        case LayerMode::Random:     which = rng.nextInt (n); break;
-    }
+    const int which = chooseLayer (padIndex, *pad, velocity);
     const float vcurve = velocity * velocity * 0.7f + velocity * 0.3f;   // gentle curve
     startVoice (pad->layers[(size_t) which], pad.get(), pad->gain * vcurve, padIndex, pad->start, pad->end, -1, 0.0, gate);
     hitCounter[padIndex].fetch_add (1, std::memory_order_relaxed);
@@ -634,7 +654,7 @@ void PadRomplerProcessor::handleKeyHit (int t, int pitch, float velocity, int64 
             {
                 v.stepTarget = v.baseStep * std::pow (2.0, semis / 12.0);
                 v.glideCoef = (float) std::exp (-1.0 / (gl * 0.001 * hostRate));
-                v.gateLeft = gate;
+                v.gateLeft = pad->play == PlayMode::OneShot ? 0 : gate;
                 v.keysPitch = pitch;
                 v.gainL = gain * jmin (1.0f, 1.0f - pad->pan);
                 v.gainR = gain * jmin (1.0f, 1.0f + pad->pan);
@@ -643,7 +663,11 @@ void PadRomplerProcessor::handleKeyHit (int t, int pitch, float velocity, int64 
             v.release (hostRate, 6.0);
         }
     }
-    if (auto* v = startVoice (pad->layers.front(), pad.get(), gain, -1, pad->start, pad->end, t, semis, gate))
+    // Sound like hitting the pad: the same velocity layer, and One-shot pads (chopped slices, drums) play
+    // to the end instead of stopping when the key is let go. Hold / Toggle pads follow the note's length.
+    if (pad->play == PlayMode::OneShot) gate = 0;
+    const auto& layer = pad->layers[(size_t) chooseLayer (padIdx, *pad, velocity)];
+    if (auto* v = startVoice (layer, pad.get(), gain, -1, pad->start, pad->end, t, semis, gate))
         v->keysPitch = pitch;
 }
 
@@ -663,6 +687,27 @@ void PadRomplerProcessor::renderVoices (AudioBuffer<float>& buffer, int start, i
     for (auto& v : voices)
     {
         if (! v.active) continue;
+        struct LogAfter                    // troubleshooting log: release and end of this voice, once per block
+        {
+            PadRomplerProcessor& p; Voice& v; bool wasReleasing;
+            ~LogAfter()
+            {
+                if (! p.midiLog.load (std::memory_order_relaxed)) return;
+                const bool inRelease = v.stage == Voice::stRelease || v.releasing;
+                if (inRelease && ! v.loggedRelease)
+                {
+                    v.loggedRelease = true;
+                    LogEvent e; e.clock = p.sampleClock; e.kind = LogEvent::soundRelease; e.track = v.keysTrack; e.pad = v.pad;
+                    e.a = (float) ((p.sampleClock - v.startedAt) / p.hostRate); e.b = v.env; e.how = v.releasing ? 2 : 1; p.logEvent (e);
+                }
+                if (! v.active)
+                {
+                    LogEvent e; e.clock = p.sampleClock; e.kind = LogEvent::soundEnd; e.track = v.keysTrack; e.pad = v.pad;
+                    e.a = (float) ((p.sampleClock - v.startedAt) / p.hostRate); e.b = v.env;
+                    e.how = v.releasing ? 2 : (v.stage == Voice::stRelease ? 1 : (v.env < 1.0e-3f ? 3 : 0)); p.logEvent (e);
+                }
+            }
+        } logAfter { *this, v, v.releasing };
         const auto& a = v.sample->audio;
         const float* sl = a.getReadPointer (0);
         const float* sr = a.getReadPointer (1);
@@ -857,10 +902,11 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
         running = true;
     }
     wasInternalPlaying = intPlay && ! hostIsPlaying;
-    if (stopSoundsReq.exchange (false) || (wasRunning && ! running))   // Stop: fade out everything still sounding
+    const bool stopAll = stopSoundsReq.exchange (false);                  // Stop sounds / Esc: everything, auditions too
+    if (stopAll || (wasRunning && ! running))                            // transport stop: pad and Keys sounds
     {
         for (auto& v : voices)
-            if (v.active && ! v.releasing && (v.pad >= 0 || v.keysTrack >= 0)) v.release (hostRate, 8.0);
+            if (v.active && ! v.releasing && (stopAll || v.pad >= 0 || v.keysTrack >= 0)) v.release (hostRate, 8.0);
         for (auto& h : held) h.on = false;
     }
     wasRunning = running;
@@ -893,7 +939,11 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
     }
     if (previewWaiting.exchange (false))
         if (auto pv = std::atomic_load (&pendingPreview))
+        {
+            for (auto& v : voices)                        // a new audition replaces the last one (no pile-up)
+                if (v.active && ! v.releasing && v.pad < 0 && v.keysTrack < 0) v.release (hostRate, 6.0);
             startVoice (pv->sample, pv->shaped ? &pv->shape : nullptr, 0.8f * (pv->shaped ? pv->shape.gain : 1.0f), -1, pv->start, pv->end);
+        }
 
     // ---- tap chop playback state for this block
     std::shared_ptr<const SampleData> tapS;
@@ -971,11 +1021,25 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
         h.nextSample = (double) (sampleClock + pos) + rollSamples;
     };
 
+    const int velMode = velocityMode.load();
+    auto touch = [velMode] (float v)            // TempoPAD... > Velocity: how hard hits count
+    {
+        if (velMode == 1) return std::sqrt (jlimit (0.0f, 1.0f, v));   // lighter touch: soft hits count louder
+        if (velMode == 2) return 1.0f;                                  // full level
+        return v;
+    };
     const bool padModes = tempoPadModes.load();
     const int keysTrackIn = keysInput.load();
     for (const auto meta : midi)
     {
         const auto msg = meta.getMessage();
+        if (midiLog.load (std::memory_order_relaxed) && ! msg.isMidiClock() && ! msg.isActiveSense())
+        {
+            LogEvent e; e.clock = sampleClock + meta.samplePosition; e.kind = LogEvent::midi;
+            const auto* raw = msg.getRawData(); e.size = msg.getRawDataSize();
+            for (int k = 0; k < 3 && k < e.size; ++k) e.bytes[k] = raw[k];
+            logEvent (e);
+        }
         const int pos = jlimit (0, numSamples - 1, meta.samplePosition);
         if (msg.isSysEx())
         {
@@ -985,15 +1049,27 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
             {
                 switch (d[3])
                 {
-                    case 0x01: case 0x09: internalPlaying = false; seqRecord = false; stopSoundsReq = true; break;   // stop / pause
-                    case 0x02: case 0x03: if (! hostIsPlaying) internalPlaying = true; break;  // play
-                    case 0x06:                                                            // record: toggle
-                        seqRecord = ! seqRecord.load();
-                        if (seqRecord.load() && ! hostIsPlaying) internalPlaying = true;
-                        break;
-                    case 0x07: seqRecord = false; break;                                  // record exit
+                    case 0x01: case 0x09: transportAction (tbStop, hostIsPlaying); break;     // stop / pause
+                    case 0x02: case 0x03: transportAction (tbPlay, hostIsPlaying); break;     // play
+                    case 0x06:            transportAction (tbRecord, hostIsPlaying); break;   // record: toggle
+                    case 0x07: seqRecord = false; break;                                      // record exit
                     default: break;
                 }
+            }
+            else if (n == 2 || n == 3)                            // other short SysEx (a button in Easy mode?)
+            {
+                const int code = transportCode (3, d[0], d[n - 1]);
+                lastMidiCode = code;
+                const int learn = transportLearn.load();
+                if (learn >= 0 && learn < numTransportButtons)
+                {
+                    for (auto& t : transportMsg) if (t.load() == code) t = 0;
+                    transportMsg[learn] = code;
+                    transportLearn = -1;
+                }
+                else
+                    for (int b = 0; b < numTransportButtons; ++b)
+                        if (transportMsg[b].load() == code) transportAction (b, hostIsPlaying);
             }
             else if (n == 1 && padModes)                          // TempoPAD Easy mode: one byte per pad
             {
@@ -1006,11 +1082,70 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
                 }
                 const int pad = noteToPad[36 + (b & 0x3F)];
                 if (pad < 0) continue;
-                ctrlMode = ctrlPatterns;
-                if (pad / PadLayout::cols == 0) selectPattern (pad % PadLayout::cols);   // top row = patterns 1-8
-                else { playPad (pad, 0.8f, pos); press (pad, 0.8f, pos); }
+                if (samplerView.load())                           // Sampler tab: chop with the pads
+                {
+                    if (tapActive) playPad (pad, 0.8f, pos);      // tap chop: the hit marks a chop point
+                    else { samplerPressPad = pad; samplerPresses.fetch_add (1); hitCounter[pad].fetch_add (1, std::memory_order_relaxed); }
+                    continue;
+                }
+                switch (easyLayout.load())
+                {
+                    case 1:                                       // all 64 play
+                        ctrlMode = ctrlPads;
+                        playPad (pad, 0.8f, pos); press (pad, 0.8f, pos);
+                        break;
+                    case 2:                                       // steps for the selected pad, read like a page
+                    {
+                        ctrlMode = ctrlSteps;
+                        const auto& pat = patterns[jlimit (0, Seq::numPatterns - 1, currentPattern.load())];
+                        if (pat.length.load() <= 32 && pad / PadLayout::cols >= PadLayout::rows / 2)
+                        {                                         // short pattern: the bottom half picks the sound
+                            stepTarget = pad;
+                            playPad (pad, 0.8f, pos);
+                        }
+                        else toggleStep (pad, 0.8f, pos);
+                        break;
+                    }
+                    default:
+                        ctrlMode = ctrlPatterns;
+                        if (pad / PadLayout::cols == 0) selectPattern (pad % PadLayout::cols);   // top row = patterns 1-8
+                        else { playPad (pad, 0.8f, pos); press (pad, 0.8f, pos); }
+                        break;
+                }
             }
             continue;
+        }
+        if (msg.isMidiStart() || msg.isMidiContinue()) { transportAction (tbPlay, hostIsPlaying); continue; }
+        if (msg.isMidiStop()) { transportAction (tbStop, hostIsPlaying); continue; }
+        if (msg.isController() || msg.isNoteOn())             // Play / Stop / Record sent as a CC or note
+        {
+            const bool isCC = msg.isController();
+            const int number = isCC ? msg.getControllerNumber() : msg.getNoteNumber();
+            const bool pressed = isCC ? msg.getControllerValue() > 0 : true;
+            const int code = transportCode (isCC ? 1 : 2, msg.getChannel(), number);
+            if (pressed) lastMidiCode = code;
+            const int learn = transportLearn.load();
+            if (learn >= 0 && learn < numTransportButtons)
+            {
+                if (pressed)
+                {
+                    for (auto& t : transportMsg) if (t.load() == code) t = 0;   // one message, one button
+                    transportMsg[learn] = code;
+                    transportLearn = -1;
+                }
+                continue;                                     // while teaching, nothing else reacts
+            }
+            bool used = false;
+            for (int b = 0; b < numTransportButtons; ++b)
+            {
+                const int t = transportMsg[b].load();
+                if (t == 0 || (t >> 16) != (isCC ? 1 : 2) || (t & 0x7F) != number) continue;
+                const int ch = (t >> 8) & 0xFF;
+                if (ch != 0 && ch != msg.getChannel()) continue;
+                if (pressed) transportAction (b, hostIsPlaying);
+                used = true;
+            }
+            if (used || (isCC && ! msg.isAllNotesOff() && ! msg.isAllSoundOff())) continue;
         }
         if (msg.isNoteOn())
         {
@@ -1019,20 +1154,20 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
             if (padModes && msg.getChannel() == 3)               // TempoPAD User mode
             {
                 ctrlMode = ctrlSteps;
-                if (pad >= 0) toggleStep (pad, msg.getFloatVelocity(), pos);
+                if (pad >= 0) toggleStep (pad, touch (msg.getFloatVelocity()), pos);
                 continue;
             }
             if (keysTrackIn >= 0 && ! tapActive)               // pads play the Keys track shown in the Sequencer
             {
                 const int note = msg.getNoteNumber();
-                const float v = msg.getFloatVelocity();
+                const float v = touch (msg.getFloatVelocity());
                 if (numHits < maxHits) hits[numHits++] = { pos, -1, v, keysTrackIn, note, -1 };
                 keyDown[note] = { keysTrackIn, running ? ppq0 + pos * ppqPerSample : -1.0, v, currentPattern.load() };
                 continue;
             }
             if (padModes) { ctrlMode = ctrlPads; stepTarget = pad; }
-            playPad (pad, msg.getFloatVelocity(), pos);
-            press (pad, msg.getFloatVelocity(), pos);
+            playPad (pad, touch (msg.getFloatVelocity()), pos);
+            press (pad, touch (msg.getFloatVelocity()), pos);
         }
         else if (msg.isNoteOff())
         {
@@ -1500,3 +1635,17 @@ bool PadRomplerProcessor::loadKit (const File& file)
 AudioProcessorEditor* PadRomplerProcessor::createEditor() { return new PadRomplerEditor (*this); }
 
 AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new PadRomplerProcessor(); }
+
+void PadRomplerProcessor::transportAction (int button, bool hostIsPlaying)
+{
+    switch (button)
+    {
+        case tbStop:   internalPlaying = false; seqRecord = false; stopSoundsReq = true; break;
+        case tbPlay:   if (! hostIsPlaying) internalPlaying = true; break;
+        case tbRecord:
+            seqRecord = ! seqRecord.load();
+            if (seqRecord.load() && ! hostIsPlaying) internalPlaying = true;
+            break;
+        default: break;
+    }
+}

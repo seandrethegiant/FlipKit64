@@ -1,7 +1,7 @@
 # FlipKit64
 
 **A free 64-pad drum sampler, slicer and step sequencer (VST3 + standalone, Windows).**
-By seandrethegiant · Version 0.9.8 beta
+By seandrethegiant · Version 0.9.9 beta
 
 FlipKit64 is a pad instrument in the spirit of classic sampling drum machines: drop your samples onto an 8×8 grid of pads, chop loops and records into slices, shape each pad, and sequence it all in sync with your DAW. It works with any MIDI pad controller or keyboard, and the grid follows the common 64-pad "drum rack" note layout (notes 36–99) used by 8×8 pad controllers such as the Synido TempoPAD.
 
@@ -15,6 +15,7 @@ Source code and downloads: https://github.com/seandrethegiant/FlipKit64
 
 **Pads**
 - 64 pads; drag samples from the built-in browser or Windows Explorer onto a pad
+- **Fill many pads at once**: drop several samples or a whole folder on a pad and they fill the pads from there, or right-click a folder in the browser and choose **Load folder as kit**. **Sort by sound type** puts kicks, snares, hats and percussion each on their own row (bass and keys on the right half). Ctrl+Z on the Pads tab puts the pads back. Shift+drop adds layers instead.
 - Several samples per pad: round-robin, velocity layers or random
 - Per pad: level, pan, tune/fine, start/end, low-pass filter with resonance, reverse, mono, choke groups (1–8)
 - **Envelope** (attack, decay, sustain, release) you shape by dragging: the attack peak, the decay-to-sustain point and the release end, plus a diamond on each part to bend its curve. Drawn over the pad's waveform; **Pluck / Keys / Swell** presets, **Hear it** (plays the pad and lets go so you hear the release, with a dot following along), **Reset**, double-click a point to put it back. The release plays when a Hold pad is let go, a Toggle pad is stopped or a Keys note ends; one-shots play out. Kits from earlier versions sound the same.
@@ -48,6 +49,7 @@ Source code and downloads: https://github.com/seandrethegiant/FlipKit64
 
 **Browser**
 - Saved locations for your sample folders and music library ("Add a folder...")
+- **Search** (Ctrl+F): finds samples in the location and all its folders by name or folder words ("808 kick"). Click to hear, double-click or Enter to put it on the selected pad, drag to any pad, right-click for "Show in its folder".
 - Preview player: click a sample to hear it (click again to replay), or use the player under the browser for long tracks: waveform you can click to jump around, play/pause, stop, loop, and "Chop it" to send it to the Sampler. Space plays/pauses, Esc stops.
 - Network locations: browse a PC's shared folders directly ("Add a network location...", on Linux and Chromebook). Samples download once into a local cache, so they play instantly and kits keep working; if the cache is cleared, kits fetch their samples again. On Windows, add a share with "Add a folder..." and a path like `\\PC-NAME\Music`.
 - Formats: WAV, AIFF, FLAC, OGG, MP3
@@ -56,8 +58,11 @@ Source code and downloads: https://github.com/seandrethegiant/FlipKit64
 FlipKit64 follows the TempoPAD's own mode buttons, so you can build a beat from the controller:
 - **Drum** (or Key): play the pads.
 - **User**: each pad turns a step on or off for the pad you last hit (top-left pad = step 1, reading across like a page). The Sequencer opens on that pad; switch back to Drum, hit another pad, and come back to program that one.
-- **Easy**: the top row of pads picks patterns 1-8 (changing at the end of the bar while playing); the other pads play.
-- **Play / Stop / Record**: turn the TempoPAD's **MMC** button on. Play starts FlipKit64's sequencer, Record arms live recording (and starts playing if stopped), Stop stops both.
+- **Easy**: the top row of pads picks patterns 1-8 (changing at the end of the bar while playing); the other pads play. In the **TempoPAD...** menu you can make Easy mode's pads all play, or turn steps on and off for a sound picked in the bottom half.
+- **Pad lights** (Easy mode): the pads light up in FlipKit64's colours: loaded pads, hits, the current and queued pattern, steps and the playhead. On the Sampler tab they show the slice map (press a pad to hear its slice) and tap-chop progress. While the Sampler records, the pads turn dim red (top row pulsing while it waits for sound), then show a scrolling input level meter with the recording time across the top row. On a Chromebook the lights go through the MIDI bridge.
+- **Play / Stop / Record**: work with the TempoPAD's **MMC** button on, and in any mode without it: Stop works out of the box, and **TempoPAD... > Teach Play / Stop / Record** learns whatever a button sends. Play starts FlipKit64's sequencer, Record arms live recording (and starts playing if stopped), Stop stops both.
+- **Velocity** (TempoPAD... menu): **As played**, **Lighter touch** (soft hits count louder, good for Key mode) or **Full level** (every hit at full volume).
+- Keys tracks played from the pads sound like the pad itself: the same velocity layer, and One-shot pads (chops, drums) play to the end. Set a pad to Hold if you want notes to stop when you let go.
 - Turn it off with **TempoPAD modes** in the Sequencer tab. The other buttons (Mood, Octave, Transpose, Velocity, Light) only change the controller's own settings. If your pads play the wrong sounds, Octave or Transpose has probably shifted them.
 
 ## Install (Windows)
@@ -93,8 +98,9 @@ Kits and patterns are saved with your DAW project. **Save kit / Load kit** saves
 
 ## Known limitations
 
-- Windows only for now (VST3 and standalone).
-- No time-stretching or built-in effects yet.
+- Windows (VST3 and standalone) and Chromebook / Linux (standalone); no Mac version yet.
+- No time-stretching or built-in effects yet: a Keys note pitched up plays faster, so it's shorter (an octave up is half as long). Time-stretch is planned.
+- Search works in folders on your computer, not network locations yet.
 - M4A/AAC files aren't supported.
 - Tracks that are set to receive "All" MIDI inputs may also hear other controllers' knobs and faders; set the track's MIDI input to your pad controller if that happens.
 

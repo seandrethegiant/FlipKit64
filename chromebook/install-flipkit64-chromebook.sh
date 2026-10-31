@@ -58,7 +58,9 @@ ChromeOS keeps USB MIDI controllers for itself, so Linux apps can't see them.
 Chrome can, through Web MIDI. This bridge serves a small page at
 http://localhost:8765 that reads your controllers in Chrome and relays their
 MIDI to a virtual port in Linux called "Chromebook MIDI", which FlipKit64 uses
-like a normal MIDI input.
+like a normal MIDI input. FlipKit64's TempoPAD pad colours go the other way:
+it sends them to a virtual port called "FlipKit64 lights", and the page passes
+them on to the TempoPAD.
 
 Needs only Python 3 and python3-rtmidi. No other libraries.
 """
@@ -68,6 +70,7 @@ import rtmidi
 
 PORT = 8765
 PORT_NAME = "Chromebook MIDI"
+LIGHTS_PORT = "FlipKit64 lights"
 GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 PAGE = r"""<!doctype html>
@@ -91,6 +94,7 @@ PAGE = r"""<!doctype html>
 <div class="row"><span>MIDI access</span><span id="midi" class="dim">waiting...</span></div></div>
 <div class="card"><b>Controllers</b><div id="inputs" class="dim">none yet - plug one in</div></div>
 <div class="card"><b>Last message</b><div id="last"></div><div class="dim" id="count">0 messages relayed</div></div>
+<div class="card"><div class="row"><span>TempoPAD pad lights</span><span id="lights" class="dim">waiting for FlipKit64</span></div></div>
 <button id="go" hidden>Allow MIDI access</button>
 <p style="margin-top:18px"><a href="/monitor" target="_blank" style="color:#ff8c2e">Open the button tester</a> - see exactly what each pad and button sends.</p>
 </main><script>
@@ -101,6 +105,18 @@ function connect(){
   ws.binaryType = 'arraybuffer';
   ws.onopen = () => { $('ws').textContent = 'connected'; $('ws').className = 'ok'; };
   ws.onclose = () => { $('ws').textContent = 'not running - start FlipKit64'; $('ws').className = 'bad'; setTimeout(connect, 1500); };
+  ws.onmessage = (e) => lightsOut(new Uint8Array(e.data));
+}
+// Pad colours from FlipKit64 -> the TempoPAD (only Synido outputs; never the Midi Through loopback)
+let lightMsgs = 0;
+function lightsOut(d){
+  if (!access) return;
+  let n = 0;
+  for (const o of access.outputs.values())
+    if (/tempopad|synido/i.test(o.name) && !/through/i.test(o.name)) { try { o.send(d); n++; } catch (err) {} }
+  lightMsgs++;
+  $('lights').textContent = n ? ('sending (' + lightMsgs + ' updates) - put the TempoPAD in Easy mode') : 'no TempoPAD found';
+  $('lights').className = n ? 'ok' : 'bad';
 }
 function onMsg(e){
   if (e.data[0] >= 0xF8) return;            // skip clock / active sensing
@@ -385,10 +401,31 @@ def ws_frame_parse(buf):
     return opcode, bytes(data), i + ln
 
 
+def ws_frame(payload):
+    """One unmasked binary WebSocket frame (server -> browser)."""
+    n = len(payload)
+    if n < 126:
+        head = bytes([0x82, n])
+    elif n < 65536:
+        head = bytes([0x82, 126]) + struct.pack(">H", n)
+    else:
+        head = bytes([0x82, 127]) + struct.pack(">Q", n)
+    return head + payload
+
+
 class Bridge:
     def __init__(self, out):
         self.out = out
         self.clients = 0          # connected bridge tabs (the launcher asks via /status)
+        self.writers = set()      # open WebSocket connections, for pad lights going back to Chrome
+
+    def lights(self, data):
+        frame = ws_frame(bytes(data))
+        for w in list(self.writers):
+            try:
+                w.write(frame)
+            except Exception:
+                self.writers.discard(w)
 
     async def handle(self, reader, writer):
         try:
@@ -406,6 +443,7 @@ class Bridge:
                           f"Sec-WebSocket-Accept: {acc}\r\n\r\n").encode())
             await writer.drain()
             self.clients += 1
+            self.writers.add(writer)
             print("Chrome connected", flush=True)
             buf = b""
             try:
@@ -429,6 +467,7 @@ class Bridge:
             except (ConnectionError, asyncio.IncompleteReadError):
                 pass
             self.clients -= 1
+            self.writers.discard(writer)
             print("Chrome disconnected", flush=True)
             writer.close()
             return
@@ -457,7 +496,17 @@ async def main():
         print("Fix: run  sudo usermod -aG audio $USER  then shut down Linux and open it again.")
         sys.exit(1)
     print(f'Virtual MIDI port "{PORT_NAME}" is ready.', flush=True)
-    server = await asyncio.start_server(Bridge(out).handle, "0.0.0.0", PORT)
+    bridge = Bridge(out)
+    loop = asyncio.get_running_loop()
+    try:                                  # FlipKit64 -> TempoPAD pad colours
+        lights_in = rtmidi.MidiIn(rtmidi.API_LINUX_ALSA)
+        lights_in.ignore_types(sysex=False, timing=True, active_sense=True)
+        lights_in.open_virtual_port(LIGHTS_PORT)
+        lights_in.set_callback(lambda ev, _=None: loop.call_soon_threadsafe(bridge.lights, ev[0]))
+        print(f'Virtual MIDI port "{LIGHTS_PORT}" is ready.', flush=True)
+    except Exception as e:
+        print("Pad lights are off (could not open the lights port):", e, flush=True)
+    server = await asyncio.start_server(bridge.handle, "0.0.0.0", PORT)
     print(f"Open http://localhost:{PORT} in Chrome and keep that tab open.", flush=True)
     async with server:
         await server.serve_forever()

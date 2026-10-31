@@ -59,10 +59,18 @@ struct EditorContext
     virtual int getSelectedPad() const = 0;
     virtual void selectPad (int index) = 0;
     virtual juce::Array<juce::File> browserSelection() const = 0;
+    virtual juce::Array<juce::File> browserItems() const { return browserSelection(); }   // files and folders
     virtual void dropFiles (int padIndex, const juce::Array<juce::File>& files) = 0;
     virtual void openInSampler (const juce::File& file) = 0;
     virtual void tempoPadModesChanged (bool) {}
     virtual void clearAllRequested() {}
+    virtual void padLightsChanged (bool) {}
+    virtual void stopAllRequested() { getProc().stopAllSounds(); }
+    virtual void easyLayoutChanged (int) {}
+    virtual void transportButtonsChanged() {}
+    virtual void velocityModeChanged (int) {}
+    virtual void midiLogChanged (bool) {}             // troubleshooting log on/off
+    virtual juce::File midiLogFile() const { return {}; }       // a TempoPAD button was taught: save it
     static constexpr const char* dragId = "PadRomplerFiles";
 };
 

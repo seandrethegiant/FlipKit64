@@ -334,6 +334,48 @@ public:
     std::atomic<bool> tempoPadModes { true };
     std::atomic<int> ctrlMode { ctrlNone };
     std::atomic<int> stepTarget { 0 };          // pad that Steps-mode presses write to
+    // Easy mode is the only mode where the TempoPAD takes live pad colours, so FlipKit64 decides
+    // what its pads do there: 0 = top row picks patterns, rest play; 1 = all play; 2 = steps.
+    std::atomic<int> easyLayout { 0 };
+    std::atomic<int> velocityMode { 0 };         // pads played live: 0 as played, 1 lighter touch, 2 full level
+
+    // TempoPAD Play / Stop / Record when they don't send MMC (MMC off, or a mode that sends them as CCs).
+    // Each: (type << 16) | (channel << 8) | number; type 1 = CC, 2 = note; channel 0 = any; 0 = not set.
+    enum TransportButton { tbStop = 0, tbPlay, tbRecord, numTransportButtons };
+    static int transportCode (int type, int channel, int number) { return (type << 16) | (channel << 8) | number; }
+    static constexpr int defaultStopCode = (1 << 16) | 127;    // Synido's default: Stop = CC 127
+    std::atomic<int> transportMsg[numTransportButtons] { { defaultStopCode }, { 0 }, { 0 } };
+    std::atomic<int> transportLearn { -1 };      // a button waiting to be taught: the next CC or note becomes it
+    std::atomic<int> lastMidiCode { 0 };         // the last CC / note received (shown while teaching)
+    void transportAction (int button, bool hostIsPlaying);
+
+    // Troubleshooting log (TempoPAD... > Write a MIDI log): incoming MIDI and how long each sound lasts.
+    struct LogEvent
+    {
+        enum Kind : uint8_t { midi = 1, soundStart, soundRelease, soundEnd, soundStolen };
+        juce::int64 clock = 0;     // samples since start
+        uint8_t kind = 0, bytes[3] {};
+        int size = 0, track = -1, pad = -1;
+        float a = 0.0f, b = 0.0f;  // start: gain, semis   end/release: seconds since start, level
+        juce::int64 gate = 0;
+        int how = 0;               // end: 0 end of sample, 1 faded out after release, 2 cut short (choke / steal / stop)
+    };
+    std::atomic<bool> midiLog { false };
+    juce::AbstractFifo logFifo { 2048 };
+    LogEvent logBuf[2048];
+    double logRate() const { return hostRate; }
+    void logEvent (const LogEvent& e) noexcept
+    {
+        if (! midiLog.load (std::memory_order_relaxed)) return;
+        int s1, n1, s2, n2;
+        logFifo.prepareToWrite (1, s1, n1, s2, n2);
+        if (n1 > 0) { logBuf[s1] = e; logFifo.finishedWrite (1); }
+    }
+    std::atomic<bool> padLights { true };       // send pad colours to the TempoPAD (Easy mode)
+    std::atomic<bool> samplerView { false };    // Sampler tab open: Easy-mode presses pick slices (editor reads samplerPress)
+    std::atomic<int> samplerPressPad { -1 };
+    std::atomic<uint32_t> samplerPresses { 0 };
+    std::unique_ptr<class PadLights> lights;
     std::atomic<int> lastStepEdit { -1 };
     std::atomic<uint32_t> stepEdits { 0 };      // bumped on each Steps-mode edit (editor repaints)
 
@@ -343,6 +385,7 @@ public:
     std::atomic<int> recSource { 0 };            // 0 = FlipKit64's own output, 1 = audio input
     std::atomic<float> recThreshold { 0.0f };    // linear; 0 = start immediately
     std::atomic<int> recPos { 0 };
+    std::atomic<int> recMax { 1 };               // recording buffer length in samples (pad lights' time bar)
     std::atomic<float> recInputLevel { 0.0f };   // meter for the editor
     bool armRecording (double maxSeconds = 60.0);
     void stopRecording();
@@ -386,6 +429,7 @@ private:
     bool wasRunning = false;
     void handleKeyHit (int track, int pitch, float velocity, juce::int64 gate);
     void releaseKey (int track, int pitch);
+    int chooseLayer (int padIndex, const PadState& pad, float velocity);
     struct Voice;
     Voice* startVoice (const SamplePtr& s, const PadState* pad, float gain, int padIndex, float start = 0.0f, float end = 1.0f,
                        int keysTrack = -1, double semis = 0.0, juce::int64 gate = 0);
@@ -451,6 +495,8 @@ private:
         bool active = false;
         // Keys notes
         int keysTrack = -1, keysPitch = 0;
+        juce::int64 startedAt = 0;             // troubleshooting log: when it started, whether its release was logged
+        bool loggedRelease = false;
         juce::int64 gateLeft = 0;              // >0 counts down to the note-off, -1 = held, 0 = none
         double baseStep = 1.0, stepTarget = 1.0;
         float glideCoef = 0.0f;

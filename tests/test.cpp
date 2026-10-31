@@ -2,6 +2,9 @@
 #include "../Source/SamplerPage.h"
 #include "../Source/Network.h"
 #include "../Source/PluginEditor.h"
+#include "../Source/Lights.h"
+#include "../Source/KitFill.h"
+#include "../Source/SampleSearch.h"
 #include <cstdio>
 using namespace juce;
 
@@ -344,6 +347,7 @@ int main (int, char** argv)
 
         PadRomplerProcessor q; q.prepareToPlay (SR, BS);
         q.assignRegion (A, makeTone (3.0, 440.0f), 0, 1, "keys");
+        q.updatePad (A, [] (PadState& p) { p.play = PlayMode::Hold; });   // Hold pads follow the note length
         q.keysTracks[0].sourcePad = A; q.keysTracks[0].root = 60; q.keysTracks[0].mono = false;
         auto& lane = q.patterns[0].lanes[0];                           // 1/8 steps: step 2 = beat 1.0
         lane.set (q.makeNotes ({ { 72, 2, 2, 110 } }));                // C4, an octave up, 2 steps = 1 beat
@@ -378,6 +382,25 @@ int main (int, char** argv)
         check (rms (z, (size_t) (0.05 * SR), (size_t) (0.35 * SR)) > 0.05 && std::abs (fz - 554.4) < 12.0 && rms (z2, (size_t) (0.1 * SR), (size_t) (0.3 * SR)) < 1e-3,
                ("Keys from the pads: a held note sounds at its pitch and stops on release (" + String (fz, 0) + " Hz)").toRawUTF8());
 
+        {   // One-shot pads (chopped slices) play out like hitting the pad, and use the same velocity layer
+            q.updatePad (A, [] (PadState& p) { p.play = PlayMode::OneShot; });
+            MidiBuffer on3; on3.addEvent (MidiMessage::noteOn (1, 60, 1.0f), 0);
+            renderTo (q, nullptr, 0.1, &on3);
+            MidiBuffer off3; off3.addEvent (MidiMessage::noteOff (1, 60), 0);
+            auto w = renderTo (q, nullptr, 0.5, &off3);
+            check (rms (w, (size_t) (0.3 * SR), (size_t) (0.45 * SR)) > 0.05, "Keys from the pads: a One-shot pad keeps playing after the key is let go");
+            q.stopAllSounds(); renderTo (q, nullptr, 0.1);
+            q.assignRegion (A, makeTone (1.0, 220.0f), 0, 1, "soft");
+            auto hardLayer = makeTone (1.0, 880.0f);
+            q.updatePad (A, [hardLayer] (PadState& p) { p.layers.push_back (hardLayer); p.mode = LayerMode::Velocity; p.play = PlayMode::Hold; });
+            MidiBuffer hard; hard.addEvent (MidiMessage::noteOn (1, 60, 1.0f), 0);
+            auto hv = renderTo (q, nullptr, 0.3, &hard);
+            const double fh = freq (hv, (size_t) (0.05 * SR), (size_t) (0.25 * SR));
+            check (std::abs (fh - 880.0) < 15.0, ("Keys from the pads: a hard hit plays the hard velocity layer (" + String (fh, 0) + " Hz)").toRawUTF8());
+            MidiBuffer offh; offh.addEvent (MidiMessage::noteOff (1, 60), 0); renderTo (q, nullptr, 0.3, &offh);
+            q.assignRegion (A, makeTone (3.0, 440.0f), 0, 1, "keys");
+            q.updatePad (A, [] (PadState& p) { p.play = PlayMode::Hold; });
+        }
         q.seqRecord = true; ph.ppq = 0.0; ph.playing = true;
         renderTo (q, &ph, 0.5);
         MidiBuffer on2; on2.addEvent (MidiMessage::noteOn (1, 67, 0.8f), 0);
@@ -594,6 +617,33 @@ int main (int, char** argv)
         check (q.seqRecord.load() && q.internalPlaying.load(), "MMC Record while stopped starts playing and recording");
         mmc (0x01);
 
+        // Play / Stop / Record without MMC: Synido's default Stop CC, taught buttons, MIDI Start/Stop
+        mmc (0x02); send (MidiMessage::controllerEvent (2, 127, 127));
+        check (! q.internalPlaying.load(), "Stop as CC 127 (Synido default) stops, on any channel");
+        q.transportLearn = PadRomplerProcessor::tbPlay;
+        send (MidiMessage::controllerEvent (1, 118, 127));
+        check (q.transportLearn.load() == -1 && ! q.internalPlaying.load()
+               && q.transportMsg[PadRomplerProcessor::tbPlay].load() == PadRomplerProcessor::transportCode (1, 1, 118),
+               "teach Play: the next CC becomes the Play button (and doesn't play yet)");
+        send (MidiMessage::controllerEvent (1, 118, 0));
+        check (! q.internalPlaying.load(), "taught button: the release (value 0) does nothing");
+        send (MidiMessage::controllerEvent (1, 118, 127));
+        check (q.internalPlaying.load(), "taught Play starts the transport");
+        q.transportLearn = PadRomplerProcessor::tbRecord;
+        send (MidiMessage::noteOn (5, 20, 1.0f));
+        send (MidiMessage::noteOn (5, 20, 1.0f));
+        check (q.seqRecord.load(), "taught Record as a note toggles record");
+        q.transportLearn = PadRomplerProcessor::tbStop;
+        { const uint8_t d[] = { 0x10, 0x01 }; send (MidiMessage::createSysExMessage (d, 2)); }
+        { const uint8_t d[] = { 0x10, 0x01 }; send (MidiMessage::createSysExMessage (d, 2)); }
+        check (! q.internalPlaying.load() && ! q.seqRecord.load(), "taught Stop as short SysEx stops");
+        send (MidiMessage::midiStart());
+        check (q.internalPlaying.load(), "MIDI Start plays");
+        send (MidiMessage::midiStop());
+        check (! q.internalPlaying.load(), "MIDI Stop stops");
+        send (MidiMessage::allNotesOff (1));      // still reaches the all-notes-off handling
+        q.transportMsg[0] = PadRomplerProcessor::defaultStopCode; q.transportMsg[1] = 0; q.transportMsg[2] = 0;
+
         send (MidiMessage::noteOn (1, 40, 1.0f));
         check (q.ctrlMode.load() == PadRomplerProcessor::ctrlPads && q.stepTarget.load() == padOfNote (40),
                "Drum-mode hit picks the pad that User mode will program");
@@ -619,6 +669,51 @@ int main (int, char** argv)
         const uint32_t h1 = hits (q, 36);
         easy (0x00);                                                    // bottom-left pad
         check (hits (q, 36) == h1 + 1 && q.currentPattern.load() == 7, "Easy mode: other pads still play");
+
+        q.easyLayout = 1;                                               // 0.9.9: what Easy mode's pads do
+        q.assignRegion (7, makeTone (0.2, 300.0f), 0, 1, "top right");
+        const uint32_t hTop = q.hitCounter[7].load();
+        easy (0x3F);
+        check (q.hitCounter[7].load() == hTop + 1 && q.currentPattern.load() == 7, "Easy mode, all-play layout: the top row plays too");
+        q.easyLayout = 2; q.stepTarget = A; q.patterns[7].length = 16;
+        easy (0x3F);                                                    // top-right = step 8
+        check (q.ctrlMode.load() == PadRomplerProcessor::ctrlSteps && q.patterns[7].vel[A][7].load() > 0,
+               "Easy mode, steps layout: top-right pad turns step 8 on for the selected pad");
+        easy (0x00);                                                    // bottom-left: a 16-step pattern leaves the bottom half to pick sounds
+        check (q.stepTarget.load() == padOfNote (36) && q.patterns[7].vel[padOfNote (36)][56].load() == 0,
+               "Easy mode, steps layout: a bottom-half pad picks the sound to program (short patterns)");
+        q.easyLayout = 0;
+
+        {   // pad lights: what the TempoPAD shows, and the bytes that go to it
+            Lights::Inputs in;
+            in.layout = Lights::layoutPatterns; in.currentPattern = 2; in.queuedPattern = 5; in.patternUsed[0] = true;
+            in.loaded[padOfNote (36)] = true;
+            auto f = Lights::render (in);
+            const int ledPat3 = Lights::ledForPad (2), ledPat1 = Lights::ledForPad (0), ledEmpty = Lights::ledForPad (padOfNote (37));
+            check (f[(size_t) ledPat3].r == 127 && f[(size_t) ledPat1].r > 0 && f[(size_t) ledPat1].r < 60 && f[(size_t) Lights::ledForPad (7)].r == 0 && f[(size_t) ledEmpty].r == 0
+                   && f[(size_t) Lights::ledForPad (padOfNote (36))].g > 0,
+                   "lights: playing pattern bright, used pattern dim, loaded pad in its colour, empty pad dark");
+            check (Lights::ledForPad (padOfNote (36)) == 0 && Lights::ledForPad (0) == 28 && Lights::ledForPad (7) == 63,
+                   "lights: pad numbers follow the TempoPAD (bottom-left 0, top-left 28, top-right 63)");
+            in.flash[padOfNote (36)] = 1.0f;
+            auto f2 = Lights::render (in);
+            check (f2[0].g > f[0].g * 2 && f2[0].b > 100, "lights: a hit lights the pad up in its colour");
+            auto all = Lights::encode (f, f, true);
+            auto none = Lights::encode (f, f, false);
+            auto one = Lights::encode (f2, f, false);
+            check (all.size() == 259 && all[0] == 0xF0 && all[1] == 0x65 && all.back() == 0xF7 && none.empty()
+                   && one.size() == 7 && one[2] == 0 && one[4] > 100,
+                   "lights: full frame is F0 65 + 64 x (pad R G B) + F7; only changed pads are sent");
+            Lights::Inputs st; st.layout = Lights::layoutSteps; st.stepPad = padOfNote (36); st.stepLength = 16; st.playStep = 3; st.stepOn[0] = true;
+            auto fs = Lights::render (st);
+            check (fs[(size_t) Lights::ledForPad (0)].g > 100 && fs[(size_t) Lights::ledForPad (3)].g == 127
+                   && fs[(size_t) Lights::ledForPad (20)].r == 0 && fs[(size_t) Lights::ledForPad (20)].b == 0,
+                   "lights, steps: step on lit, playhead white, past the length dark");
+            st.loaded[padOfNote (37)] = true;
+            auto fp = Lights::render (st);
+            const auto chosen = fp[(size_t) Lights::ledForPad (padOfNote (36))], other = fp[(size_t) Lights::ledForPad (padOfNote (37))];
+            check (other.g > 0 && chosen.g > other.g * 2, "lights, steps: bottom half shows the sounds, the chosen one brightest");
+        }
 
         q.tempoPadModes = false;
         const uint32_t h2 = hits (q, 36);
@@ -835,6 +930,15 @@ int main (int, char** argv)
         run (q, 1, 36); run (q, (int) (0.1 * SR / BS)); const float body = run (q, 4);
         run (q, (int) (0.28 * SR / BS)); const float nearEnd = run (q, 4);
         check (nearEnd < body * 0.35f, "slice fade out: the end of the region fades");
+
+        q.stopAllSounds(); run (q, 200);                               // auditions: one at a time, and Stop sounds stops them
+        auto longTone = makeTone (5.0, 200.0f);
+        q.previewRegion (longTone, 0.0f, 1.0f); run (q, 20);
+        const float one = run (q, 20);
+        q.previewRegion (longTone, 0.0f, 1.0f); run (q, 40);
+        const float again = run (q, 20);
+        q.stopAllSounds(); run (q, 200);
+        check (again < one * 1.3f && run (q, 20) < 1e-4f, "auditions don't pile up, and Stop sounds silences them");
     }
 
 
@@ -979,7 +1083,202 @@ int main (int, char** argv)
         sp->redo();
         check (sp->getWave().markers.size() != before, "sampler redo");
         sp->undo();
-        if (auto* snap3 = std::getenv ("FLIPKIT_SNAP3"))
+        {   // Sampler tab on the TempoPAD: slices on the pads, press to hear/select (0.9.9)
+            ed->showTab (1);
+            MessageManager::getInstance()->runDispatchLoopUntil (100);
+            auto si = sp->lightInfo();
+            check (si.active && si.slice[padOfNote (36)] == 0 && si.slice[padOfNote (43)] == 7 && si.slice[padOfNote (44)] == -1,
+                   "sampler lights: the 8 slices sit on pads 36-43");
+            check (q.samplerView.load(), "sampler lights: the Sampler tab puts Easy mode's pads on slices");
+            AudioBuffer<float> b (2, BS); MidiBuffer mb;
+            const uint8_t easyPad[] = { (uint8_t) (40 - 36) };
+            mb.addEvent (MidiMessage::createSysExMessage (easyPad, 1), 0);
+            q.processBlock (b, mb);
+            sp->tick();
+            check (sp->getWave().selectedSlice == 4 && q.ctrlMode.load() != PadRomplerProcessor::ctrlPatterns,
+                   "sampler lights: pressing pad 40 in Easy mode selects slice 5 (and stays in the Sampler)");
+            Lights::Inputs in; in.sampler = true;
+            for (int i = 0; i < 64; ++i) in.slice[i] = si.slice[i];
+            in.selectedSlice = 4;
+            auto f = Lights::render (in);
+            const auto sel = f[(size_t) Lights::ledForPad (padOfNote (40))], other = f[(size_t) Lights::ledForPad (padOfNote (37))];
+            check (sel.g > other.g * 3 && other.g > 0 && f[(size_t) Lights::ledForPad (padOfNote (44))].g == 0,
+                   "sampler lights: selected slice bright, other slices dim, no slice dark");
+            Lights::Inputs tp; tp.sampler = true; tp.tapping = true; tp.tapProgress = 0.5f; tp.tapped[padOfNote (36)] = true;
+            auto ft = Lights::render (tp);
+            check (ft[(size_t) Lights::ledForPad (0)].r > 0 && ft[(size_t) Lights::ledForPad (4)].g == 127 && ft[(size_t) Lights::ledForPad (6)].r == 0
+                   && ft[(size_t) Lights::ledForPad (padOfNote (36))].g > 100,
+                   "sampler lights, tap chop: top row is a progress bar, tapped pads stay lit");
+            ed->showTab (0);
+        }
+        {   // ---------------- 0.9.9 auto-assign: fill pads from a folder
+        using namespace KitFill;
+        check (groupOf ("BD_02") == kicks && groupOf ("Kick Punch") == kicks && groupOf ("SD hard") == snares
+               && groupOf ("Clap 1") == snares && groupOf ("HH closed") == hats && groupOf ("Open Hat") == hats
+               && groupOf ("Shaker") == perc && groupOf ("Sub Bass C1") == melodic && groupOf ("Keys EP C3") == melodic
+               && groupOf ("Thing") == other && groupOf ("Chair") == other, "kit fill: sound types from names");
+        check (naturalCompare ("Hit 2", "Hit 10") < 0 && naturalCompare ("hit 10", "Hit 2") > 0 && naturalCompare ("A", "a") == 0,
+               "kit fill: natural sort (2 before 10)");
+
+        const File dir = File::getSpecialLocation (File::tempDirectory).getChildFile ("fk-kitfill");
+        dir.deleteRecursively(); dir.createDirectory();
+        auto tone = makeTone (0.1, 200.0f, 10.0f);
+        auto write = [&] (const String& name)
+        {
+            const File f = dir.getChildFile (name);
+            WavAudioFormat wav; auto* os = f.createOutputStream().release();
+            std::unique_ptr<AudioFormatWriter> w (wav.createWriterFor (os, SR, 1, 16, {}, 0));
+            w->writeFromAudioSampleBuffer (tone->audio, 0, tone->audio.getNumSamples());
+            return f;
+        };
+        for (auto n : { "Snare 1.wav", "Kick 10.wav", "Kick 2.wav", "Hat closed.wav", "Sub Bass.wav", "Kick 1.wav" }) write (n);
+        dir.getChildFile ("readme.txt").replaceWithText ("not audio");
+
+        const auto audio = audioFiles ({ dir });
+        check (audio.size() == 6, "kit fill: only audio files from the folder");
+        const auto slots = layout (audio, true, true);
+        auto at = [&] (int i) { return i < slots.size() ? slots[i].getFileNameWithoutExtension() : String ("-"); };
+        check (at (0) == "Kick 1" && at (1) == "Kick 2" && at (2) == "Kick 10" && at (3).isEmpty()
+               && at (4) == "Snare 1" && at (8) == "Hat closed" && at (32) == "Sub Bass" && slots.size() == 33,
+               "kit fill: kicks row, snares row, hats row, melodic from note 68");
+        const auto plain = layout (audio, false, false);
+        check (plain.size() == 6 && plain[0].getFileNameWithoutExtension() == "Hat closed", "kit fill: plain = alphabetical, no gaps");
+
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        std::unique_ptr<AudioProcessorEditor> base (q.createEditor());
+        auto* ed = dynamic_cast<PadRomplerEditor*> (base.get());
+        ed->setSize (1280, 780);
+        q.assignRegion (padOfNote (36), makeTone (0.2, 60.0f, 10.0f), 0, 1, "Old kick");
+        q.assignRegion (padOfNote (90 - 26), makeTone (0.2, 60.0f, 10.0f), 0, 1, "Old top");
+        ed->dropFiles (padOfNote (40), { dir });               // a folder dropped on pad 40 (smart sort on by default)
+        auto nameAt = [&] (int note) { auto p = q.getPad (padOfNote (note)); return p != nullptr && ! p->layers.empty() ? p->name : String ("-"); };
+        check (nameAt (40) == "Kick 1" && nameAt (41) == "Kick 2" && nameAt (42) == "Kick 10" && nameAt (44) == "Snare 1"
+               && nameAt (48) == "Hat closed" && nameAt (52) == "Sub Bass" && nameAt (36) == "Old kick",
+               "kit fill: folder drop fills pads from the drop pad, keeps the others");
+        check (ed->undoFill() && nameAt (40) == "-" && nameAt (36) == "Old kick", "kit fill: undo puts the pads back");
+        check (ed->fillPads (padOfNote (36), { dir }, true) == 6 && nameAt (36) == "Kick 1" && nameAt (68) == "Sub Bass" && nameAt (64) == "-",
+               "kit fill: load folder as kit replaces the pads");
+        ed->undoFill();
+        check (nameAt (64) == "Old top", "kit fill: undo after load-as-kit restores the old kit");
+        // more files than pads from near the end
+        check (ed->fillPads (padOfNote (98), { dir }, false) == 2, "kit fill: stops at the last pad (rest reported)");
+        dir.deleteRecursively();
+    }
+    {   // ---------------- parity: a slice played from a Keys track sounds like hitting its pad
+        auto render = [] (PadRomplerProcessor& p, int keysIn, int note, float vel, double holdSec, double total)
+        {
+            p.keysInput = keysIn;
+            AudioBuffer<float> b (2, BS); double sum = 0; int n = 0, last = 0; const int offAt = (int) (holdSec * SR / BS);
+            for (int i = 0; i < (int) (total * SR / BS); ++i)
+            {
+                MidiBuffer m;
+                if (i == 0) m.addEvent (MidiMessage::noteOn (1, note, vel), 0);
+                if (i == offAt) m.addEvent (MidiMessage::noteOff (1, note), 0);
+                p.processBlock (b, m);
+                for (int s = 0; s < BS; ++s) { const float x = b.getSample (0, s); sum += x * x; ++n; if (std::abs (x) > 1e-3f) last = i * BS + s; }
+            }
+            return std::make_pair ((float) std::sqrt (sum / n), last / SR);
+        };
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        const int first = padOfNote (36);
+        for (int k = 0; k < 4; ++k) q.assignRegion (padOfNote (36 + k), makeTone (0.8, 300.0f + 50 * k, 0.5f), 0, 1, "slice");
+        auto& kt = q.keysTracks[0]; kt.sourcePad = first; kt.root = 60; kt.sliceCount = 4; kt.mono = false;
+        for (float vel : { 0.4f, 0.8f, 1.0f })
+        {
+            const auto padHit = render (q, -1, 37, vel, 0.05, 1.2); q.stopAllSounds(); render (q, -1, 0, 0.0f, 0.0, 0.1);
+            const auto keyHit = render (q, 0, 61, vel, 0.05, 1.2); q.stopAllSounds(); render (q, -1, 0, 0.0f, 0.0, 0.1);
+            std::printf ("   vel %.1f  pad rms %.4f len %.3f s   keys rms %.4f len %.3f s\n", vel, padHit.first, padHit.second, keyHit.first, keyHit.second);
+            check (std::abs (padHit.first - keyHit.first) < padHit.first * 0.02f && std::abs (padHit.second - keyHit.second) < 0.01,
+                   "parity: a slice from the Keys track is as loud and as long as its pad");
+        }
+    }
+    {   // ---------------- troubleshooting MIDI log
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        std::unique_ptr<AudioProcessorEditor> base (q.createEditor());
+        auto* ed = dynamic_cast<PadRomplerEditor*> (base.get());
+        q.assignRegion (padOfNote (36), makeTone (0.3, 300.0f, 1.0f), 0, 1, "Slice 1");
+        auto& kt = q.keysTracks[0]; kt.sourcePad = padOfNote (36); kt.root = 60; kt.sliceCount = 1;
+        ed->midiLogChanged (true);
+        q.keysInput = 0;
+        AudioBuffer<float> b (2, BS);
+        for (int i = 0; i < 400; ++i)
+        {
+            MidiBuffer m;
+            if (i == 0) m.addEvent (MidiMessage::noteOn (1, 60, (uint8) 90), 0);
+            if (i == 20) m.addEvent (MidiMessage::noteOff (1, 60), 0);
+            q.processBlock (b, m);
+        }
+        ed->drainMidiLog();
+        const auto f = ed->midiLogFile();
+        ed->midiLogChanged (false);
+        const auto text = f.loadFileAsString();
+        std::printf ("%s\n", text.toRawUTF8());
+        check (text.contains ("note on   ch 1  note 60  velocity 90") && text.contains ("sound starts   Keys 1") && text.contains ("reached the end of the sample")
+               && text.contains ("Keys 1 (") && text.contains ("One-shot"), "MIDI log: notes, sounds and their lengths are written to the file");
+    }
+    {   // ---------------- velocity setting: as played, lighter touch, full level
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        q.assignRegion (A, makeTone (0.5, 300.0f), 0, 1, "tone");
+        const int note = PadLayout::noteForPad (A);
+        float lv[3];
+        for (int m = 0; m < 3; ++m) { q.velocityMode = m; lv[m] = run (q, 40, note, 0.3f); run (q, 600); }
+        q.velocityMode = 2; const float full = lv[2]; q.velocityMode = 0; const float hard = run (q, 40, note, 1.0f); run (q, 600);
+        std::printf ("   soft hit (0.3): as played %.4f, lighter %.4f, full %.4f, hard hit %.4f\n", lv[0], lv[1], lv[2], hard);
+        check (lv[0] < lv[1] && lv[1] < lv[2] && std::abs (full - hard) < hard * 0.02f,
+               "velocity: lighter touch makes soft hits louder, full level plays every hit like the hardest");
+    }
+    {   // ---------------- sample browser search
+        const File dir = File::getSpecialLocation (File::tempDirectory).getChildFile ("fk-search");
+        dir.deleteRecursively();
+        for (auto rel : { "808 Kits/Kick 01.wav", "808 Kits/Snare_hard.wav", "Acoustic/Kick Room.aif", "Acoustic/deep/Hat open.wav",
+                          "Loops/Dusty Keys 88bpm.wav", "Loops/notes.txt", "kick 10.wav", "kick 2.wav" })
+        {
+            const File f = dir.getChildFile (rel); f.getParentDirectory().createDirectory(); f.replaceWithText ("x");
+        }
+        check (SampleSearch::matches ("808 kits/kick 01", { "808", "kick" }) && ! SampleSearch::matches ("acoustic/kick room", { "808", "kick" }),
+               "search: every word must match the name or folder");
+        SampleSearch ss;
+        ss.setRoot (dir);
+        for (int i = 0; i < 100 && (ss.isIndexing() || ss.numResults() == 0); ++i)
+        {
+            ss.setQuery ("kick");
+            MessageManager::getInstance()->runDispatchLoopUntil (50);
+        }
+        MessageManager::getInstance()->runDispatchLoopUntil (300);
+        ss.setQuery ("kick");
+        String names; for (int i = 0; i < ss.numResults(); ++i) names << ss.result (i).getFileNameWithoutExtension() << ", ";
+        std::printf ("   search \"kick\": %s(%s)\n", names.toRawUTF8(), ss.status().toRawUTF8());
+        check (ss.numResults() == 4 && ss.result (0).getFileNameWithoutExtension() == "kick 2" && ss.result (1).getFileNameWithoutExtension() == "Kick 01"
+               || (ss.numResults() == 4 && ss.result (0).getFileNameWithoutExtension() == "Kick 01" && ss.result (2).getFileNameWithoutExtension() == "kick 10"),
+               "search: finds kicks in every folder, in natural order");
+        ss.setQuery ("808 snare hard");
+        check (ss.numResults() == 1 && ss.result (0).getFileName() == "Snare_hard.wav", "search: folder words and underscores count");
+        ss.setQuery ("deep");
+        check (ss.numResults() == 1 && ss.result (0).getFileName() == "Hat open.wav", "search: matches sub-sub-folders");
+        ss.setQuery ("notes");
+        check (ss.numResults() == 0, "search: only audio files");
+        dir.deleteRecursively();
+    }
+    {   // ---------------- recording lights
+        using namespace Lights;
+        check (meterRows (0.0f) == 0 && meterRows (1.0f) == 7 && meterRows (0.01f) > 0 && meterRows (0.01f) < meterRows (0.5f),
+               "rec lights: louder input lights more rows");
+        Inputs in; in.layout = layoutPads;
+        for (int p = 0; p < PadLayout::numPads; ++p) in.loaded[p] = true;
+        in.recording = 1; in.blinkOn = true;
+        auto armed = render (in);
+        const auto topLeft = armed[(size_t) ledForPad (0)], bottomLeft = armed[(size_t) ledForPad (56)];
+        check (topLeft.r > 0 && topLeft.g == 0 && topLeft.b == 0 && bottomLeft.r > 0 && bottomLeft.r < 10 && bottomLeft.g == 0,
+               "rec lights: armed = pads dim red, top row pulsing red");
+        in.recording = 2; in.recProgress = 0.5f;
+        for (int c = 0; c < PadLayout::cols; ++c) in.recLevel[c] = c == 7 ? 1.0f : 0.0f;
+        auto rec = render (in);
+        const auto loudBottom = rec[(size_t) ledForPad (63)], loudTop = rec[(size_t) ledForPad (15)], quiet = rec[(size_t) ledForPad (56)];
+        const auto barDone = rec[(size_t) ledForPad (1)], barLeft = rec[(size_t) ledForPad (6)];
+        check (loudBottom.b > 100 && loudTop.r == 127 && loudTop.g == 0 && quiet.r < 10 && barDone.r > 50 && barLeft.r == 0,
+               "rec lights: recording = level meter (cyan up to red) and a time bar across the top row");
+    }
+    if (auto* snap3 = std::getenv ("FLIPKIT_SNAP3"))
         {
             sp->setChopMode (3);
             ed->showTab (1);
@@ -995,6 +1294,7 @@ int main (int, char** argv)
     if (auto* snap3 = std::getenv ("FLIPKIT_SNAP3"))
     {   // ---------------- 0.9.8 screenshots: envelope editor, sampler
         PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        if (auto* demo = std::getenv ("FLIPKIT_DEMO_ROOT")) q.browserRoot = File (demo);
         std::unique_ptr<AudioProcessorEditor> base (q.createEditor());
         auto* ed = dynamic_cast<PadRomplerEditor*> (base.get());
         ed->setSize (1280, 780);
@@ -1023,6 +1323,11 @@ int main (int, char** argv)
         ed->showTab (1);
         MessageManager::getInstance()->runDispatchLoopUntil (200);
         shot ("sampler");
+        ed->showTab (0);
+        for (auto* c : ed->getChildren())
+            if (auto* te = dynamic_cast<TextEditor*> (c)) { te->setText ("kick", true); }
+        MessageManager::getInstance()->runDispatchLoopUntil (1500);
+        shot ("search");
     }
     std::printf ("%d failures\n", fails);
     return fails;
