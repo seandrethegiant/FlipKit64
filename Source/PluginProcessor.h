@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_audio_utils/juce_audio_utils.h>
+#include "TimeStretch.h"
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -71,6 +72,12 @@ struct PadState
     float cutoff = 20000.0f;           // Hz, 20000 = filter off
     float reso = 0.0f;                 // 0 .. 1
     bool reverse = false;
+    // Time stretch: on = the sample's length and pitch are separate. Tune / Keys then change pitch only, and
+    // the length follows `stretch` (2 = twice as long), times srcBpm / host tempo when `stretchSync` is on.
+    bool stretchOn = false;
+    bool stretchSync = false;
+    float stretch = 1.0f;              // 0.25 .. 4
+    float srcBpm = 0.0f;               // tempo the sample was made at (0 = unknown, sync does nothing)
     bool mono = false;                 // retrigger cuts the previous hit of this pad
     int choke = 0;                     // 0 = none, 1..8: pads in the same group cut each other
     PlayMode play = PlayMode::OneShot;
@@ -500,6 +507,9 @@ private:
         juce::int64 gateLeft = 0;              // >0 counts down to the note-off, -1 = held, 0 = none
         double baseStep = 1.0, stepTarget = 1.0;
         float glideCoef = 0.0f;
+        // time stretch (slot < 0 = ordinary tape-style playback)
+        TimeStretch::Cursor stretch;
+        float stretchManual = 1.0f, stretchSrcBpm = 0.0f;   // stretchSrcBpm > 0 = follows the host tempo
         void release (double sr, double ms = 4.0) { releasing = true; releaseCoef = (float) std::exp (-1.0 / (ms * 0.001 * sr)); }
         void beginSegment (uint8_t st, float from, float to, float k, double inc)
         {
@@ -511,6 +521,8 @@ private:
     static constexpr int maxVoices = 128;
     Voice voices[maxVoices];
     double hostRate = 44100.0;
+    double blockBpm = 120.0;                 // tempo for this block (audio thread), drives synced stretch
+    TimeStretch::Pool stretchPool;           // prepared in prepareToPlay
 
     // per-pad round robin counters (audio thread only)
     int rrIndex[PadLayout::numPads] {};

@@ -79,7 +79,9 @@ private:
 public:
     EnvelopePanel envelope { ctx };
 private:
-    juce::ToggleButton reverseToggle { "Reverse" }, monoToggle { "Mono" };
+    juce::ToggleButton reverseToggle { "Reverse" }, monoToggle { "Mono" },
+                       stretchToggle { "Stretch" }, syncToggle { "Sync" };
+    juce::Slider stretchAmt, srcBpm;                 // compact bars: length multiplier, the sample's own tempo
     LayerList layerModel { ctx };
     juce::ListBox layerList { "Layers", &layerModel };
     juce::TextButton upButton { "Up" }, downButton { "Down" }, removeButton { "Remove" }, clearButton { "Clear pad" };
@@ -120,6 +122,9 @@ public:
     void clearAllRequested() override;
     void padLightsChanged (bool on) override;
     void stopAllRequested() override;
+   #if FLIPKIT_STEMS
+    void splitStemsRequested (const SamplePtr&) override;
+   #endif
     void easyLayoutChanged (int layout) override;
     void transportButtonsChanged() override;
     void velocityModeChanged (int mode) override;

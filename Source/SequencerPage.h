@@ -109,7 +109,8 @@ private:
     EditorContext& ctx;
     PadRomplerProcessor& proc;
 
-    juce::TextButton playButton { "Play" }, recButton { "Rec" }, clearButton { "Clear" }, dupButton { "Copy to next" };
+    juce::TextButton playButton { "Play" }, recButton { "Rec" }, clearButton { "Clear" }, dupButton { "Copy to next" },
+                      stopSoundsButton { "Stop sounds" };
     juce::Label bpmLabel, transportInfo, lengthLabel, resLabel, swingLabel, patLabel;
     juce::Slider bpmSlider, swingSlider;
     juce::ComboBox lengthBox, resBox;

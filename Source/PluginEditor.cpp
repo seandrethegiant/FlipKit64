@@ -1,6 +1,9 @@
 #include "PluginEditor.h"
 #include "Lights.h"
 #include "KitFill.h"
+#if FLIPKIT_STEMS
+ #include "StemJob.h"
+#endif
 
 using namespace juce;
 using namespace UI;
@@ -197,6 +200,35 @@ PadsPage::PadsPage (EditorContext& c) : ctx (c), proc (c.getProc())
                [] (PadState& p, double v) { p.cutoff = (float) v; });
     setupKnob (reso, 0.0, 1.0, 0.01, 0.0, [] (double v) { return String ((int) std::round (v * 100)) + "%"; },
                [] (PadState& p, double v) { p.reso = (float) v; });
+    auto setupBar = [this] (Slider& sl, double min, double max, double interval, double skewMid, double resetTo,
+                            std::function<String (double)> fmt, std::function<void (PadState&, double)> apply)
+    {
+        sl.setSliderStyle (Slider::LinearBar);
+        sl.setRange (min, max, interval);
+        if (skewMid > min && skewMid < max) sl.setSkewFactorFromMidPoint (skewMid);
+        sl.setTextBoxIsEditable (false);
+        sl.textFromValueFunction = fmt;
+        sl.setDoubleClickReturnValue (true, resetTo);
+        sl.setColour (Slider::trackColourId, accent.withAlpha (0.55f));
+        sl.setColour (Slider::backgroundColourId, panel.brighter (0.08f));
+        sl.setColour (Slider::textBoxTextColourId, text);
+        sl.updateText();
+        sl.onValueChange = [this, &sl, apply]
+        {
+            if (refreshing) return;
+            const double v = sl.getValue();
+            proc.updatePad (ctx.getSelectedPad(), [apply, v] (PadState& p) { apply (p, v); });
+        };
+        addAndMakeVisible (sl);
+    };
+    setupBar (stretchAmt, TimeStretch::minLength, TimeStretch::maxLength, 0.01, 1.0, 1.0,
+              [] (double v) { return "Length  x" + String (v, 2); },
+              [] (PadState& p, double v) { p.stretch = (float) v; });
+    setupBar (srcBpm, 0.0, 300.0, 0.01, 0.0, 0.0,
+              [] (double v) { return v < 20.0 ? String ("Sample BPM  ?") : "Sample  " + String (v, 1) + " bpm"; },
+              [] (PadState& p, double v) { p.srcBpm = v < 20.0 ? 0.0f : (float) v; });
+    stretchAmt.setTooltip ("How long the pad plays: x2 = twice as long, x0.5 = half. Pitch stays put (Tune moves it). Double-click to reset.");
+    srcBpm.setTooltip ("The tempo this sample was made at. With Sync on, the pad plays at the project's tempo. Drag up from ? to set it.");
     level.slider.setDoubleClickReturnValue (true, 0.0);
     pan.slider.setDoubleClickReturnValue (true, 0.0);
     tune.slider.setDoubleClickReturnValue (true, 0.0);
@@ -209,6 +241,18 @@ PadsPage::PadsPage (EditorContext& c) : ctx (c), proc (c.getProc())
         t->setColour (ToggleButton::tickColourId, accent);
         addAndMakeVisible (t);
     }
+    for (auto* t : { &stretchToggle, &syncToggle })
+    {
+        t->setColour (ToggleButton::textColourId, text);
+        t->setColour (ToggleButton::tickColourId, accent);
+        addAndMakeVisible (t);
+    }
+    stretchToggle.setTooltip ("Time stretch: change the length without changing the pitch, and Tune / Keys change the pitch without changing the length");
+    syncToggle.setTooltip ("Play at the project's tempo (needs the sample's BPM). Length multiplies with this.");
+    stretchToggle.onClick = [this] { if (refreshing) return; const bool b = stretchToggle.getToggleState();
+                                     proc.updatePad (ctx.getSelectedPad(), [b] (PadState& p) { p.stretchOn = b; }); };
+    syncToggle.onClick = [this] { if (refreshing) return; const bool b = syncToggle.getToggleState();
+                                  proc.updatePad (ctx.getSelectedPad(), [b] (PadState& p) { p.stretchSync = b; }); };
     monoToggle.setTooltip ("Mono: hitting the pad again cuts off the previous hit");
     reverseToggle.onClick = [this] { if (refreshing) return; const bool b = reverseToggle.getToggleState();
                                      proc.updatePad (ctx.getSelectedPad(), [b] (PadState& p) { p.reverse = b; }); };
@@ -270,6 +314,10 @@ void PadsPage::refreshPanel()
     end.slider.setValue (pad->end, dontSendNotification);
     cutoff.slider.setValue (pad->cutoff, dontSendNotification);
     reso.slider.setValue (pad->reso, dontSendNotification);
+    stretchAmt.setValue (pad->stretch, dontSendNotification);
+    srcBpm.setValue (pad->srcBpm, dontSendNotification);
+    stretchToggle.setToggleState (pad->stretchOn, dontSendNotification);
+    syncToggle.setToggleState (pad->stretchSync, dontSendNotification);
     reverseToggle.setToggleState (pad->reverse, dontSendNotification);
     monoToggle.setToggleState (pad->mono, dontSendNotification);
     layerList.updateContent();
@@ -359,8 +407,16 @@ void PadsPage::resized()
     }
     {
         auto tr = pr.removeFromTop (24);
-        reverseToggle.setBounds (tr.removeFromLeft (tr.getWidth() / 2));
-        monoToggle.setBounds (tr);
+        const int tw = tr.getWidth() / 4;
+        reverseToggle.setBounds (tr.removeFromLeft (tw + 6));
+        monoToggle.setBounds (tr.removeFromLeft (tw - 6));
+        stretchToggle.setBounds (tr.removeFromLeft (tw + 6));
+        syncToggle.setBounds (tr);
+        pr.removeFromTop (2);
+        auto br = pr.removeFromTop (22);
+        stretchAmt.setBounds (br.removeFromLeft (br.getWidth() / 2 - 3));
+        br.removeFromLeft (6);
+        srcBpm.setBounds (br);
     }
     pr.removeFromTop (6);
     hint.setBounds (pr.removeFromBottom (30));
@@ -586,6 +642,9 @@ PadRomplerEditor::PadRomplerEditor (PadRomplerProcessor& p)
 
 PadRomplerEditor::~PadRomplerEditor()
 {
+   #if FLIPKIT_STEMS
+    StemJob::cancelAndWait();            // never leave the separation thread running after the editor (or plugin) goes
+   #endif
     proc.onPadsChanged = nullptr;
     proc.samplerView = false;
     if (logStream != nullptr) midiLogChanged (false);
@@ -922,6 +981,73 @@ void PadRomplerEditor::stopAllRequested()
     samplerPage.stopAuditions();
     proc.stopAllSounds();
 }
+
+#if FLIPKIT_STEMS
+void PadRomplerEditor::splitStemsRequested (const SamplePtr& sample)
+{
+    if (sample == nullptr) return;
+    SafePointer<PadRomplerEditor> safe (this);
+
+    if (StemJob::busy())
+    {
+        AlertWindow::showMessageBoxAsync (MessageBoxIconType::InfoIcon, "Splitting stems",
+                                          "A split is already running. Wait for it to finish, or cancel it first.");
+        return;
+    }
+
+    if (! StemSeparator::runtimeAvailable())
+    {
+        auto folder = StemSeparator::stemsFolder();
+        folder.createDirectory();
+        auto* w = new AlertWindow ("Stem splitting needs ONNX Runtime",
+                                   "Stem splitting uses the free ONNX Runtime library, which isn't part of FlipKit64.\n\n"
+                                   "Put the ONNX Runtime library (onnxruntime.dll on Windows, libonnxruntime.so on Linux and Chromebook) "
+                                   "into this folder, then try again:\n\n" + folder.getFullPathName(),
+                                   MessageBoxIconType::NoIcon);
+        w->addButton ("Open the folder", 1);
+        w->addButton ("Close", 0, KeyPress (KeyPress::escapeKey));
+        w->enterModalState (true, ModalCallbackFunction::create ([folder] (int r) { if (r == 1) folder.revealToUser(); }), true);
+        return;
+    }
+
+    auto go = [safe, sample]
+    {
+        if (safe == nullptr) return;
+        StemJob::start (sample, [safe] (const String& error, const File& folder, const Array<File>& stems)
+        {
+            if (error == "cancelled") return;
+            if (error.isNotEmpty())
+            {
+                AlertWindow::showMessageBoxAsync (MessageBoxIconType::WarningIcon, "Couldn't split the stems", error);
+                return;
+            }
+            if (safe == nullptr) return;
+            PopupMenu m;
+            m.addSectionHeader ("Stems saved to " + folder.getFileName());
+            for (int i = 0; i < stems.size(); ++i)
+                m.addItem (i + 1, "Open " + String (StemSeparator::stemName (i)) + " in the Sampler");
+            m.addSeparator();
+            m.addItem (100, "Show the folder");
+            m.showMenuAsync (PopupMenu::Options(), [safe, stems, folder] (int r)
+            {
+                if (r == 100) folder.revealToUser();
+                else if (r > 0 && safe != nullptr && r <= stems.size()) safe->openInSampler (stems[r - 1]);
+            });
+        });
+    };
+
+    if (StemSeparator::modelPresent()) { go(); return; }
+
+    auto* ask = new AlertWindow ("Download the stem model?",
+                                 "Splitting stems needs a one-time download of the HTDemucs model (about 91 MB) from Hugging Face "
+                                 "(HRSadeghi/demucs-onnx). It is saved on this computer and everything runs locally after that.\n\n"
+                                 "The model's weights come from Meta's Demucs, whose licence terms are worth a look before you use stems commercially.",
+                                 MessageBoxIconType::NoIcon);
+    ask->addButton ("Download and split", 1);
+    ask->addButton ("Cancel", 0, KeyPress (KeyPress::escapeKey));
+    ask->enterModalState (true, ModalCallbackFunction::create ([go] (int r) { if (r == 1) go(); }), true);
+}
+#endif
 
 void PadRomplerEditor::padLightsChanged (bool on)
 {

@@ -602,7 +602,19 @@ SamplerPage::SamplerPage (EditorContext& c) : ctx (c), proc (c.getProc())
         addAndMakeVisible (b);
     }
     gridButtons[1].setToggleState (true, dontSendNotification);
-    for (auto* b : { &chopButton, &clearMarkersButton, &tuneDown, &tuneUp, &normalizeButton, &trimButton }) { styleButton (*b); addAndMakeVisible (b); }
+    for (auto* b : { &chopButton, &clearMarkersButton, &tuneDown, &tuneUp, &normalizeButton, &trimButton, &stopSoundsButton }) { styleButton (*b); addAndMakeVisible (b); }
+    stopSoundsButton.setTooltip ("Stop every sound that's still playing (Esc)");
+    stopSoundsButton.onClick = [this] { ctx.stopAllRequested(); };
+   #if FLIPKIT_STEMS
+    styleButton (splitStemsButton); addAndMakeVisible (splitStemsButton);
+    splitStemsButton.setTooltip ("Separate this sample into drums, bass, other and vocals (runs on your computer, can take a few minutes)");
+    splitStemsButton.onClick = [this]
+    {
+        auto s = wave.getSample();
+        if (s == nullptr) { sliceInfo.setText ("Load a sample first", dontSendNotification); return; }
+        ctx.splitStemsRequested (s);
+    };
+   #endif
     chopButton.setColour (TextButton::buttonColourId, accent.darker (0.35f));
     chopButton.onClick = [this] { doChop(); };
     clearMarkersButton.onClick = [this] { pushUndo(); wave.markers.clear(); wave.selectedSlice = -1; wave.repaint(); markersChanged(); };
@@ -1379,6 +1391,10 @@ void SamplerPage::resized()
         loadButton.setBounds (r.removeFromLeft (120)); r.removeFromLeft (10);
         redoButton.setBounds (r.removeFromRight (56)); r.removeFromRight (4);
         undoButton.setBounds (r.removeFromRight (56)); r.removeFromRight (10);
+        stopSoundsButton.setBounds (r.removeFromRight (92)); r.removeFromRight (6);
+       #if FLIPKIT_STEMS
+        splitStemsButton.setBounds (r.removeFromRight (104)); r.removeFromRight (6);
+       #endif
         fileLabel.setBounds (r);
     }
     t.removeFromTop (8);

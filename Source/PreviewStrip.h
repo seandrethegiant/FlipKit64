@@ -17,7 +17,11 @@ public:
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
 
+   #if FLIPKIT_STEMS
+    static constexpr int preferredHeight = 146;     // + a row for "Split stems..."
+   #else
     static constexpr int preferredHeight = 112;
+   #endif
 
 private:
     class RoundButton : public juce::Button
@@ -44,6 +48,9 @@ private:
 
     RoundButton playButton { RoundButton::playPause }, stopButton { RoundButton::stopKind };
     juce::TextButton loopButton { "Loop" }, chopButton { "Chop it" };
+   #if FLIPKIT_STEMS
+    juce::TextButton stemsButton { "Split into stems..." };
+   #endif
     juce::Label nameLabel, timeLabel;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PreviewStrip)

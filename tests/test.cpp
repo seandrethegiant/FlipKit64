@@ -84,6 +84,38 @@ static SamplePtr makeLoop (double bpm, int beats)
 static int padOfNote (int note) { for (int i = 0; i < 64; ++i) if (PadLayout::noteForPad (i) == note) return i; return -1; }
 static uint32_t hits (PadRomplerProcessor& p, int note) { return p.hitCounter[padOfNote (note)].load(); }
 
+
+// seconds until the last audible sample after a hit on `note` (left channel above -40 dB), up to maxSec
+static double lastAudible (PadRomplerProcessor& p, int note, double maxSec = 8.0, int hits = 1)
+{
+    AudioBuffer<float> b (2, BS); MidiBuffer m;
+    for (int i = 0; i < hits; ++i) m.addEvent (MidiMessage::noteOn (1, note, 1.0f), 0);
+    long last = 0, pos = 0;
+    for (long blk = 0; blk < (long) (maxSec * SR / BS); ++blk)
+    {
+        p.processBlock (b, m); m.clear();
+        for (int s = 0; s < BS; ++s, ++pos) if (std::abs (b.getSample (0, s)) > 0.01f) last = pos;
+    }
+    return last / SR;
+}
+// average frequency from zero crossings of the left channel between two times
+static double hitFreq (PadRomplerProcessor& p, int note, double fromSec, double toSec)
+{
+    AudioBuffer<float> b (2, BS); MidiBuffer m; m.addEvent (MidiMessage::noteOn (1, note, 1.0f), 0);
+    long pos = 0, zc = 0, first = -1, last = -1; float prev = 0;
+    for (long blk = 0; blk < (long) (toSec * SR / BS) + 1; ++blk)
+    {
+        p.processBlock (b, m); m.clear();
+        for (int s = 0; s < BS; ++s, ++pos)
+        {
+            const float x = b.getSample (0, s);
+            if (pos > fromSec * SR && pos < toSec * SR && prev < 0 && x >= 0) { if (first < 0) first = pos; last = pos; ++zc; }
+            prev = x;
+        }
+    }
+    return zc > 1 ? (zc - 1) * SR / (double) (last - first) : 0.0;
+}
+
 int main (int, char** argv)
 {
     ScopedJuceInitialiser_GUI init;
@@ -1328,6 +1360,81 @@ int main (int, char** argv)
             if (auto* te = dynamic_cast<TextEditor*> (c)) { te->setText ("kick", true); }
         MessageManager::getInstance()->runDispatchLoopUntil (1500);
         shot ("search");
+    }
+
+    {   // ---------------- time stretch
+        PadRomplerProcessor p; p.prepareToPlay (SR, BS);
+        const int N = 36, Pad = padOfNote (N);
+        p.assignRegion (Pad, makeLoop (120.0, 4), 0, 1, "loop");      // 4 beats at 120 bpm = 2 s, last click at 1.5 s
+        const double plain = lastAudible (p, N);
+        silence (p);
+        check (plain > 1.5 && plain < 1.7, "stretch: plain loop ends just after its last click");
+
+        p.updatePad (Pad, [] (PadState& s) { s.stretchOn = true; s.stretch = 2.0f; });
+        const double twice = lastAudible (p, N, 8.0);
+        silence (p);
+        std::printf ("   stretch x2: ends at %.3f s (plain %.3f)\n", twice, plain);
+        check (std::abs (twice - plain * 2.0) < 0.12, "stretch: x2 plays twice as long");
+
+        p.updatePad (Pad, [] (PadState& s) { s.stretch = 0.5f; });
+        const double half = lastAudible (p, N);
+        silence (p);
+        check (std::abs (half - plain * 0.5) < 0.1, "stretch: x0.5 plays half as long");
+
+        p.updatePad (Pad, [] (PadState& s) { s.stretch = 1.0f; s.stretchSync = true; s.srcBpm = 120.0f; });
+        p.internalBpm = 240.0;
+        const double sync240 = lastAudible (p, N);
+        silence (p);
+        std::printf ("   sync 120->240 bpm: ends at %.3f s\n", sync240);
+        check (std::abs (sync240 - plain * 0.5) < 0.1, "stretch: sync to a tempo twice the sample's halves the length");
+        p.internalBpm = 120.0;
+        check (std::abs (lastAudible (p, N) - plain) < 0.1, "stretch: sync at the sample's own tempo changes nothing");
+        silence (p);
+        p.updatePad (Pad, [] (PadState& s) { s.srcBpm = 0.0f; });
+        check (std::abs (lastAudible (p, N) - plain) < 0.1, "stretch: sync without a sample BPM does nothing");
+        silence (p);
+
+        p.updatePad (Pad, [] (PadState& s) { s.stretchSync = false; s.tune = 12.0f; });
+        check (std::abs (lastAudible (p, N) - plain) < 0.1, "stretch: Tune +12 keeps the length");
+        silence (p);
+        p.updatePad (Pad, [] (PadState& s) { s.stretchOn = false; });
+        check (std::abs (lastAudible (p, N) - plain * 0.5) < 0.1, "stretch off: Tune +12 still plays tape-style (half length)");
+        silence (p);
+
+        // pitch: a 220 Hz tone stretched x2 stays at 220 Hz; +12 st doubles it
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        q.assignRegion (Pad, makeTone (1.0, 220.0f), 0, 1, "tone");
+        q.updatePad (Pad, [] (PadState& s) { s.stretchOn = true; s.stretch = 2.0f; });
+        const double f1 = hitFreq (q, N, 0.5, 1.5);
+        silence (q);
+        std::printf ("   tone x2: %.1f Hz\n", f1);
+        check (std::abs (f1 - 220.0) < 3.0, "stretch: x2 keeps 220 Hz");
+        q.updatePad (Pad, [] (PadState& s) { s.tune = 12.0f; s.stretch = 1.0f; });
+        const double f2 = hitFreq (q, N, 0.3, 0.8);
+        std::printf ("   tone +12st: %.1f Hz\n", f2);
+        check (std::abs (f2 - 440.0) < 5.0, "stretch: +12 st gives 440 Hz");
+        silence (q);
+
+        // reverse + stretch plays and ends
+        q.updatePad (Pad, [] (PadState& s) { s.tune = 0.0f; s.stretch = 2.0f; s.reverse = true; });
+        const double rev = lastAudible (q, N);
+        check (rev > 1.8 && rev < 2.2, "stretch: reversed x2 plays about 2 s");
+        silence (q);
+        q.updatePad (Pad, [] (PadState& s) { s.reverse = false; });
+
+        // more hits than stretch engines: nothing breaks, the rest play tape-style
+        const double many = lastAudible (q, N, 4.0, 40);
+        check (many > 1.8, "stretch: 40 simultaneous hits don't break");
+        silence (q);
+
+        // saved with the project
+        q.updatePad (Pad, [] (PadState& s) { s.stretch = 1.5f; s.stretchSync = true; s.srcBpm = 93.5f; });
+        MemoryBlock mb; q.getStateInformation (mb);
+        PadRomplerProcessor r; r.setStateInformation (mb.getData(), (int) mb.getSize());
+        auto rp = r.getPad (Pad);
+        check (rp->stretchOn && rp->stretchSync && std::abs (rp->stretch - 1.5f) < 1e-5f && std::abs (rp->srcBpm - 93.5f) < 1e-4f,
+               "state keeps the stretch settings");
+        check (! r.getPad (padOfNote (37))->stretchOn, "state: other pads keep stretch off");
     }
     std::printf ("%d failures\n", fails);
     return fails;

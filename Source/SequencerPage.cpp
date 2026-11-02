@@ -474,7 +474,9 @@ static constexpr int numRes = 7;
 
 SequencerPage::SequencerPage (EditorContext& c) : ctx (c), proc (c.getProc())
 {
-    for (auto* b : { &playButton, &recButton, &clearButton, &dupButton }) { styleButton (*b); addAndMakeVisible (b); }
+    for (auto* b : { &playButton, &recButton, &clearButton, &dupButton, &stopSoundsButton }) { styleButton (*b); addAndMakeVisible (b); }
+    stopSoundsButton.setTooltip ("Stop every sound that's still playing (Esc)");
+    stopSoundsButton.onClick = [this] { ctx.stopAllRequested(); };
     playButton.onClick = [this] { proc.internalPlaying = ! proc.internalPlaying.load(); };
     recButton.setClickingTogglesState (true);
     recButton.setColour (TextButton::buttonOnColourId, rec);
@@ -1035,7 +1037,8 @@ void SequencerPage::resized()
     bpmSlider.setBounds (row1.removeFromLeft (110)); row1.removeFromLeft (10);
     transportInfo.setBounds (row1.removeFromLeft (230)); row1.removeFromLeft (10);
     dupButton.setBounds (row1.removeFromRight (110)); row1.removeFromRight (6);
-    clearButton.setBounds (row1.removeFromRight (64));
+    clearButton.setBounds (row1.removeFromRight (64)); row1.removeFromRight (6);
+    stopSoundsButton.setBounds (row1.removeFromRight (92));
 
     b.removeFromTop (10);
     auto row2 = b.removeFromTop (28);

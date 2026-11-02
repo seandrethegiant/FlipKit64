@@ -1,7 +1,7 @@
 # FlipKit64
 
 **A free 64-pad drum sampler, slicer and step sequencer (VST3 + standalone, Windows).**
-By seandrethegiant · Version 0.9.9 beta
+By seandrethegiant · Version 0.9.10 beta
 
 FlipKit64 is a pad instrument in the spirit of classic sampling drum machines: drop your samples onto an 8×8 grid of pads, chop loops and records into slices, shape each pad, and sequence it all in sync with your DAW. It works with any MIDI pad controller or keyboard, and the grid follows the common 64-pad "drum rack" note layout (notes 36–99) used by 8×8 pad controllers such as the Synido TempoPAD.
 
@@ -18,6 +18,9 @@ Source code and downloads: https://github.com/seandrethegiant/FlipKit64
 - **Fill many pads at once**: drop several samples or a whole folder on a pad and they fill the pads from there, or right-click a folder in the browser and choose **Load folder as kit**. **Sort by sound type** puts kicks, snares, hats and percussion each on their own row (bass and keys on the right half). Ctrl+Z on the Pads tab puts the pads back. Shift+drop adds layers instead.
 - Several samples per pad: round-robin, velocity layers or random
 - Per pad: level, pan, tune/fine, start/end, low-pass filter with resonance, reverse, mono, choke groups (1–8)
+- **Time stretch** per pad: turn on **Stretch** to change a sample's length without changing its pitch. **Length** plays it x0.25 to x4 as long; **Sync** plays it at the project's tempo (set the pad's **Sample BPM**; it multiplies with Length). With Stretch on, Tune and Keys notes change the pitch only, not the length. Up to 16 stretched sounds play at once; more than that play the normal way.
+- **Split stems** (Windows): **Split stems...** in the Sampler (or **Split into stems...** in the browser's player) separates a song or loop into **drums, bass, other and vocals** with Meta's HTDemucs model, running on your own computer (a few minutes per song). The first time, it downloads the model (about 91 MB) once. The stems are saved as WAVs in `Recordings\Edits\<name> stems` and open straight into the Sampler for chopping.
+- **Stop sounds** buttons on the Sampler and Sequencer too (or press Esc)
 - **Envelope** (attack, decay, sustain, release) you shape by dragging: the attack peak, the decay-to-sustain point and the release end, plus a diamond on each part to bend its curve. Drawn over the pad's waveform; **Pluck / Keys / Swell** presets, **Hear it** (plays the pad and lets go so you hear the release, with a dot following along), **Reset**, double-click a point to put it back. The release plays when a Hold pad is let go, a Toggle pad is stopped or a Keys note ends; one-shots play out. Kits from earlier versions sound the same.
 - **Play mode** per pad: **One-shot** (plays to the end, for drum hits), **Hold** (plays only while you hold the pad; one step long from the sequencer) or **Toggle** (one press starts it, the next stops it, for long loops and records)
 - **Stop sounds** (or Esc) silences everything still playing; stopping the transport (Stop on screen, on the TempoPAD or in LUNA) fades out pad sounds too
@@ -99,8 +102,10 @@ Kits and patterns are saved with your DAW project. **Save kit / Load kit** saves
 ## Known limitations
 
 - Windows (VST3 and standalone) and Chromebook / Linux (standalone); no Mac version yet.
-- No time-stretching or built-in effects yet: a Keys note pitched up plays faster, so it's shorter (an octave up is half as long). Time-stretch is planned.
+- No built-in effects yet. With Stretch off, a Keys note pitched up plays faster, so it's shorter (an octave up is half as long); turn Stretch on for that pad to keep the length.
+- Sample BPM isn't filled in automatically yet; set it on the pad for Sync to work.
 - Search works in folders on your computer, not network locations yet.
+- Split stems is Windows only for now (not on Chromebook / Linux).
 - M4A/AAC files aren't supported.
 - Tracks that are set to receive "All" MIDI inputs may also hear other controllers' knobs and faders; set the track's MIDI input to your pad controller if that happens.
 
@@ -115,11 +120,15 @@ cmake -S FlipKit64 -B build -DJUCE_DIR=JUCE -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ```
 
-The release binaries are cross-compiled from Linux with MinGW-w64 (`mingw.cmake` toolchain file included). `-DPADROMPLER_TESTS=ON` builds the offline audio test suite (`tests/test.cpp`).
+The release binaries are cross-compiled from Linux with MinGW-w64 (`mingw.cmake` toolchain file included). `-DPADROMPLER_TESTS=ON` builds the offline audio test suite (`tests/test.cpp`). Stem splitting is built in on Windows (`-DFLIPKIT_STEMS=ON` elsewhere); it loads the ONNX Runtime library (`onnxruntime.dll` / `libonnxruntime.so`) at run time from next to FlipKit64 or from FlipKit64's stems folder, and runs without it, just without stems.
 
 ## License
 
 FlipKit64 is free software, released under the **GNU General Public License v3 or later** (see `LICENSE`). It uses the JUCE framework under its GPLv3 option, and the VST3 SDK (MIT license). VST is a registered trademark of Steinberg Media Technologies GmbH.
+
+Time stretch uses [Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch) and its [linear](https://github.com/Signalsmith-Audio/linear) helper by Geraint Luff / Signalsmith Audio (MIT license), included under `ThirdParty/`.
+
+Stem splitting uses [ONNX Runtime](https://github.com/microsoft/onnxruntime) by Microsoft (MIT license; `onnxruntime.dll` is included in the Windows download, with its licence and notices). The HTDemucs model is not included: it's downloaded on first use from Hugging Face (HRSadeghi/demucs-onnx). Its weights come from Meta's Demucs, and that page lists them as non-commercial (CC BY-NC 4.0), so check the terms before using stems in anything you sell.
 
 Network locations use [libsmb2](https://github.com/sahlberg/libsmb2) by Ronnie Sahlberg (LGPL 2.1 or later), downloaded and built automatically on Linux and ChromeOS.
 

@@ -57,6 +57,17 @@ PreviewStrip::PreviewStrip (EditorContext& c) : ctx (c), proc (c.getProc())
         ctx.openInSampler (shown->file);
     };
 
+   #if FLIPKIT_STEMS
+    styleButton (stemsButton); addAndMakeVisible (stemsButton);
+    stemsButton.setTooltip ("Separate this sample into drums, bass, other and vocals (runs on your computer, can take a few minutes)");
+    stemsButton.onClick = [this]
+    {
+        if (shown == nullptr) return;
+        proc.playerStop();
+        ctx.splitStemsRequested (shown);
+    };
+   #endif
+
     styleLabel (nameLabel, 12.0f, text);
     nameLabel.setFont (Font (12.0f, Font::bold));
     nameLabel.setMinimumHorizontalScale (1.0f);
@@ -118,6 +129,9 @@ void PreviewStrip::tick()
     playButton.setEnabled (shown != nullptr);
     stopButton.setEnabled (shown != nullptr);
     chopButton.setEnabled (shown != nullptr);
+   #if FLIPKIT_STEMS
+    stemsButton.setEnabled (shown != nullptr);
+   #endif
     if (loopButton.getToggleState() != proc.playerLooping()) loopButton.setToggleState (proc.playerLooping(), dontSendNotification);
     if (playing != lastPlaying)
     {
@@ -200,4 +214,8 @@ void PreviewStrip::resized()
     row.removeFromLeft (8);
     loopButton.setBounds (row.removeFromLeft (58).reduced (0, 5));
     chopButton.setBounds (row.removeFromRight (70).reduced (0, 5));
+   #if FLIPKIT_STEMS
+    r.removeFromTop (6);
+    stemsButton.setBounds (r.removeFromTop (28));
+   #endif
 }

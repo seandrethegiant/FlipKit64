@@ -66,6 +66,7 @@ struct EditorContext
     virtual void clearAllRequested() {}
     virtual void padLightsChanged (bool) {}
     virtual void stopAllRequested() { getProc().stopAllSounds(); }
+    virtual void splitStemsRequested (const SamplePtr&) {}      // "Split stems..." on a loaded sample (needs FLIPKIT_STEMS)
     virtual void easyLayoutChanged (int) {}
     virtual void transportButtonsChanged() {}
     virtual void velocityModeChanged (int) {}

@@ -119,6 +119,10 @@ private:
     // file + undo
     juce::Label fileLabel;
     juce::TextButton loadButton { "Load sample..." }, undoButton { "Undo" }, redoButton { "Redo" };
+    juce::TextButton stopSoundsButton { "Stop sounds" };
+   #if FLIPKIT_STEMS
+    juce::TextButton splitStemsButton { "Split stems..." };
+   #endif
     std::unique_ptr<juce::FileChooser> chooser;
     struct Snap { SamplePtr sample; std::vector<int> markers; std::vector<SliceSet> sets; double bpm; int tune; int sel; };
     std::vector<Snap> undoStack, redoStack;

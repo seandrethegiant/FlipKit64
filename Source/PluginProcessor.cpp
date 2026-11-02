@@ -68,7 +68,8 @@ void PadRomplerProcessor::prepareToPlay (double sampleRate, int blockSize)
 {
     hostRate = sampleRate > 0 ? sampleRate : 44100.0;
     inputCopy.setSize (2, jmax (blockSize, 8192));
-    for (auto& v : voices) { v.active = false; v.sample.reset(); }
+    for (auto& v : voices) { v.active = false; v.sample.reset(); v.stretch = {}; }
+    stretchPool.prepare (hostRate);
 }
 
 File PadRomplerProcessor::recordingsFolder()
@@ -550,6 +551,29 @@ PadRomplerProcessor::Voice* PadRomplerProcessor::startVoice (const SamplePtr& s,
     v->pad = padIndex;
     v->choke = keysTrack >= 0 ? 0 : ps.choke;
 
+    // time stretch: needs a free engine, otherwise this hit just plays tape-style
+    v->stretch = {};
+    v->stretchManual = ps.stretch;
+    v->stretchSrcBpm = ps.stretchSync ? ps.srcBpm : 0.0f;
+    if (ps.stretchOn && stretchPool.ready())
+    {
+        int slot = -1;
+        for (int k = 0; k < TimeStretch::numSlots && slot < 0; ++k)
+        {
+            bool used = false;
+            for (auto& o : voices) if (&o != v && o.active && o.stretch.slot == k) { used = true; break; }
+            if (! used) slot = k;
+        }
+        if (slot >= 0)
+        {
+            auto& c = v->stretch;
+            c.pos = v->pos; c.regionStart = rs; c.regionEnd = re; c.fadeLen = v->fadeOut;
+            c.reverse = ps.reverse; c.rateRatio = s->sampleRate / hostRate;
+            TimeStretch::begin (stretchPool, c, slot, s->audio.getReadPointer (0), s->audio.getReadPointer (1),
+                                TimeStretch::lengthRatio (v->stretchManual, v->stretchSrcBpm, blockBpm), v->step);
+        }
+    }
+
     v->releasing = false;
     {
         const double perMs = 0.001 * hostRate;
@@ -712,63 +736,88 @@ void PadRomplerProcessor::renderVoices (AudioBuffer<float>& buffer, int start, i
         const float* sl = a.getReadPointer (0);
         const float* sr = a.getReadPointer (1);
         const double fadeLen = v.fadeOut;     // source samples: fade at the region edge (no clicks on chops)
+        const bool stretched = v.stretch.active();
 
-        for (int i = 0; i < count; ++i)
+        for (int base = 0; base < count && v.active; base += TimeStretch::chunk)
         {
-            const double remaining = v.reverse ? v.pos - v.regionStart : v.regionEnd - 1.0 - v.pos;
-            if (remaining <= 0.0) { v.active = false; break; }
-
-            const int idx = (int) v.pos;
-            const float frac = (float) (v.pos - idx);
-            const int nxt = jmin (idx + 1, a.getNumSamples() - 1);
-            float xl = sl[idx] + frac * (sl[nxt] - sl[idx]);
-            float xr = sr[idx] + frac * (sr[nxt] - sr[idx]);
-
-            if (v.filterOn)
+            const int n = jmin (count - base, TimeStretch::chunk);
+            int valid = n;                     // stretched voices: frames the engine still has for us
+            const float* stL = nullptr;
+            const float* stR = nullptr;
+            if (stretched)
             {
-                float* in[2] = { &xl, &xr };
-                for (int c = 0; c < 2; ++c)
-                {
-                    const float v3 = *in[c] - v.ic2[c];
-                    const float v1 = v.fa1 * v.ic1[c] + v.fa2 * v3;
-                    const float v2 = v.ic2[c] + v.fa2 * v.ic1[c] + v.fa3 * v3;
-                    v.ic1[c] = 2.0f * v1 - v.ic1[c];
-                    v.ic2[c] = 2.0f * v2 - v.ic2[c];
-                    *in[c] = v2;
-                }
+                valid = TimeStretch::render (stretchPool, v.stretch, sl, sr, n,
+                                             TimeStretch::lengthRatio (v.stretchManual, v.stretchSrcBpm, blockBpm), v.step);
+                stL = stretchPool.out.data();
+                stR = stL + TimeStretch::chunk;
             }
 
-            if (v.gateLeft > 0 && --v.gateLeft == 0) v.noteOff();          // gate ends: Keys note, sequenced Hold step
-            if (v.glideCoef > 0.0f) v.step = v.stepTarget + (v.step - v.stepTarget) * v.glideCoef;
-            if (v.releasing) { v.env *= v.releaseCoef; if (v.env < 1.0e-4f) { v.active = false; break; } }
-            else if (v.stage != Voice::stSustain)
+            for (int i = 0; i < n; ++i)
             {
-                v.segT += v.segInc;
-                if (v.segT >= 1.0)
+                float xl, xr, fade = 1.0f;
+                if (stretched)
                 {
-                    v.env = v.segTo;
-                    if (v.stage == Voice::stAttack)
-                    {
-                        if (v.sustainLvl < 0.9999f) v.beginSegment (Voice::stDecay, 1.0f, v.sustainLvl, v.kD, v.decInc);
-                        else v.stage = Voice::stSustain;
-                    }
-                    else if (v.stage == Voice::stDecay) v.stage = Voice::stSustain;
-                    else { v.active = false; break; }                          // release finished
-                    if (v.stage == Voice::stSustain && v.sustainLvl < 1.0e-4f) { v.active = false; break; }
+                    if (i >= valid) { v.active = false; break; }
+                    xl = stL[i]; xr = stR[i];
                 }
                 else
                 {
-                    const float t = (float) v.segT;
-                    const float sh = std::abs (v.segK) < 1.0e-3f ? t : (std::exp (v.segK * t) - 1.0f) / v.segDen;
-                    v.env = v.segFrom + (v.segTo - v.segFrom) * sh;
-                }
-            }
+                    const double remaining = v.reverse ? v.pos - v.regionStart : v.regionEnd - 1.0 - v.pos;
+                    if (remaining <= 0.0) { v.active = false; break; }
 
-            const float fade = remaining < fadeLen ? (float) (remaining / fadeLen) : 1.0f;
-            const float g = v.env * fade;
-            L[i] += xl * v.gainL * g;
-            R[i] += xr * v.gainR * g;
-            v.pos += v.reverse ? -v.step : v.step;
+                    const int idx = (int) v.pos;
+                    const float frac = (float) (v.pos - idx);
+                    const int nxt = jmin (idx + 1, a.getNumSamples() - 1);
+                    xl = sl[idx] + frac * (sl[nxt] - sl[idx]);
+                    xr = sr[idx] + frac * (sr[nxt] - sr[idx]);
+                    if (remaining < fadeLen) fade = (float) (remaining / fadeLen);
+                }
+
+                if (v.filterOn)
+                {
+                    float* in[2] = { &xl, &xr };
+                    for (int c = 0; c < 2; ++c)
+                    {
+                        const float v3 = *in[c] - v.ic2[c];
+                        const float v1 = v.fa1 * v.ic1[c] + v.fa2 * v3;
+                        const float v2 = v.ic2[c] + v.fa2 * v.ic1[c] + v.fa3 * v3;
+                        v.ic1[c] = 2.0f * v1 - v.ic1[c];
+                        v.ic2[c] = 2.0f * v2 - v.ic2[c];
+                        *in[c] = v2;
+                    }
+                }
+
+                if (v.gateLeft > 0 && --v.gateLeft == 0) v.noteOff();          // gate ends: Keys note, sequenced Hold step
+                if (v.glideCoef > 0.0f) v.step = v.stepTarget + (v.step - v.stepTarget) * v.glideCoef;
+                if (v.releasing) { v.env *= v.releaseCoef; if (v.env < 1.0e-4f) { v.active = false; break; } }
+                else if (v.stage != Voice::stSustain)
+                {
+                    v.segT += v.segInc;
+                    if (v.segT >= 1.0)
+                    {
+                        v.env = v.segTo;
+                        if (v.stage == Voice::stAttack)
+                        {
+                            if (v.sustainLvl < 0.9999f) v.beginSegment (Voice::stDecay, 1.0f, v.sustainLvl, v.kD, v.decInc);
+                            else v.stage = Voice::stSustain;
+                        }
+                        else if (v.stage == Voice::stDecay) v.stage = Voice::stSustain;
+                        else { v.active = false; break; }                          // release finished
+                        if (v.stage == Voice::stSustain && v.sustainLvl < 1.0e-4f) { v.active = false; break; }
+                    }
+                    else
+                    {
+                        const float t = (float) v.segT;
+                        const float sh = std::abs (v.segK) < 1.0e-3f ? t : (std::exp (v.segK * t) - 1.0f) / v.segDen;
+                        v.env = v.segFrom + (v.segTo - v.segFrom) * sh;
+                    }
+                }
+
+                const float g = v.env * fade;
+                L[base + i] += xl * v.gainL * g;
+                R[base + i] += xr * v.gainR * g;
+                if (! stretched) v.pos += v.reverse ? -v.step : v.step;
+            }
         }
     }
 }
@@ -878,10 +927,11 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
     double ppq0 = 0.0, ppqPerSample = 0.0;
     bool running = false;
     bool hostIsPlaying = false;
+    bool hostGaveBpm = false;
     if (auto* ph = getPlayHead())
         if (auto pos = ph->getPosition())
         {
-            if (auto b = pos->getBpm()) hostBpm = *b;
+            if (auto b = pos->getBpm()) { hostBpm = *b; hostGaveBpm = true; }
             hostIsPlaying = pos->getIsPlaying();
             if (hostIsPlaying)
                 if (auto p = pos->getPpqPosition())
@@ -893,6 +943,7 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
         }
     hostPlaying = hostIsPlaying;
     const bool intPlay = internalPlaying.load();
+    blockBpm = (hostGaveBpm && (hostIsPlaying || ! intPlay)) ? hostBpm.load() : internalBpm.load();
     if (! running && intPlay)
     {
         if (! wasInternalPlaying) internalPpq = 0.0;
@@ -1410,6 +1461,10 @@ std::unique_ptr<XmlElement> PadRomplerProcessor::kitToXml() const
         pe->setAttribute ("pan", (double) p->pan);
         pe->setAttribute ("tune", (double) p->tune);
         pe->setAttribute ("fine", (double) p->fine);
+        if (p->stretchOn) pe->setAttribute ("stretchOn", true);
+        if (p->stretchSync) pe->setAttribute ("stretchSync", true);
+        if (p->stretch != 1.0f) pe->setAttribute ("stretch", (double) p->stretch);
+        if (p->srcBpm > 0.0f) pe->setAttribute ("srcBpm", (double) p->srcBpm);
         pe->setAttribute ("start", (double) p->start);
         pe->setAttribute ("end", (double) p->end);
         pe->setAttribute ("attack", (double) p->attackMs);
@@ -1509,6 +1564,10 @@ void PadRomplerProcessor::kitFromXml (const XmlElement& xml)
         st->pan = (float) pe->getDoubleAttribute ("pan", 0.0);
         st->tune = (float) pe->getDoubleAttribute ("tune", 0.0);
         st->fine = (float) pe->getDoubleAttribute ("fine", 0.0);
+        st->stretchOn = pe->getBoolAttribute ("stretchOn", false);
+        st->stretchSync = pe->getBoolAttribute ("stretchSync", false);
+        st->stretch = (float) jlimit (TimeStretch::minLength, TimeStretch::maxLength, pe->getDoubleAttribute ("stretch", 1.0));
+        st->srcBpm = (float) jlimit (0.0, 400.0, pe->getDoubleAttribute ("srcBpm", 0.0));
         st->start = (float) pe->getDoubleAttribute ("start", 0.0);
         st->end = (float) pe->getDoubleAttribute ("end", 1.0);
         st->attackMs = (float) pe->getDoubleAttribute ("attack", 0.0);
