@@ -1,0 +1,28 @@
+{
+  "callers": {
+    "stereo-ops": {
+      "name": "STEREO-OPS",
+      "frequency": "140.85",
+      "portrait": "/static/codec/portraits/stereo-ops.png",
+      "role": "3D conversion desk"
+    },
+    "disk-warden": {
+      "name": "DISK-WARDEN",
+      "frequency": "141.12",
+      "portrait": "/static/codec/portraits/disk-warden.png",
+      "role": "Storage watch"
+    },
+    "sentry": {
+      "name": "SENTRY",
+      "frequency": "140.96",
+      "portrait": "/static/codec/portraits/sentry.png",
+      "role": "Camera watch"
+    }
+  },
+  "event_callers": {
+    "conversion_done": "stereo-ops",
+    "disk_low": "disk-warden",
+    "camera_motion": "sentry",
+    "test": "stereo-ops"
+  }
+}

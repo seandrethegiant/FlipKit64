@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/static/codec/icons/icon-192.png">
+<title>Codec</title>
+<link rel="stylesheet" href="/static/codec/call.css">
+</head>
+<body data-state="loading">
+<main class="codec" id="codec">
+  <section class="frame portrait-frame" aria-label="Caller portrait">
+    <div class="portrait-wrap">
+      <img id="portrait" alt="" draggable="false">
+      <div class="scan"></div>
+      <div class="noise" id="portraitNoise"></div>
+    </div>
+    <div class="nameplate" id="callerName">----</div>
+  </section>
+
+  <section class="frame caller-frame" aria-label="Caller">
+    <div class="tag" id="incoming">INCOMING</div>
+    <div class="freq-label">FREQ</div>
+    <div class="freq" id="freq">---.--</div>
+    <div class="signal" id="signal" aria-hidden="true"></div>
+    <div class="role" id="role"></div>
+    <div class="clock" id="clock"></div>
+  </section>
+
+  <section class="frame text-frame" id="textFrame" aria-live="polite">
+    <div class="text" id="text"></div>
+    <div class="prompt" id="prompt"></div>
+  </section>
+</main>
+
+<div class="overlay" id="answerOverlay">
+  <button class="answer" id="answerBtn" type="button">ANSWER</button>
+  <div class="hint" id="answerHint">Tap to answer</div>
+</div>
+
+<canvas class="static" id="staticCanvas" aria-hidden="true"></canvas>
+<div class="ended" id="ended">CALL ENDED</div>
+
+<script src="/static/codec/codec-audio.js"></script>
+<script src="/static/codec/call.js"></script>
+</body>
+</html>

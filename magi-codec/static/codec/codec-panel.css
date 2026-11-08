@@ -1,0 +1,50 @@
+/* Magi Codec dashboard panel. Everything is scoped under .codec-panel so it
+   cannot restyle existing Magi pages. Override the variables to match Magi. */
+.codec-panel {
+  --codec-fg: #9dffb0;
+  --codec-dim: #4f8a5c;
+  --codec-bg: #050c07;
+  --codec-line: #1c3a24;
+  --codec-warn: #ffcf5a;
+  --codec-bad: #ff6b6b;
+  color: var(--codec-fg);
+  background: var(--codec-bg);
+  border: 1px solid var(--codec-line);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 16px 0;
+  font: 14px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  max-width: 760px;
+  box-sizing: border-box;
+}
+.codec-panel h2, .codec-panel h3 { margin: 0; font-size: 15px; letter-spacing: .12em; text-transform: uppercase; }
+.codec-panel h3 { margin-top: 16px; margin-bottom: 6px; color: var(--codec-dim); font-size: 13px; }
+.codec-panel .codec-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.codec-panel .codec-status b { padding: 2px 8px; border: 1px solid currentColor; border-radius: 4px; font-size: 12px; letter-spacing: .1em; }
+.codec-panel .codec-status[data-state="off"] { color: var(--codec-dim); }
+.codec-panel .codec-status[data-state="blocked"], .codec-panel .codec-status[data-state="unsupported"] { color: var(--codec-bad); }
+.codec-panel .codec-status[data-state="working"] { color: var(--codec-warn); }
+.codec-panel .codec-detail { margin-top: 6px; color: var(--codec-fg); opacity: .85; min-height: 1em; }
+.codec-panel .codec-install { margin-top: 2px; font-size: 12px; color: var(--codec-dim); }
+.codec-panel .codec-install[data-ok="0"] { color: var(--codec-warn); }
+.codec-panel .codec-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.codec-panel .codec-btn {
+  font: inherit; color: #021006; background: var(--codec-fg); border: 0; border-radius: 4px;
+  padding: 8px 14px; cursor: pointer; letter-spacing: .04em; min-height: 40px;
+}
+.codec-panel .codec-btn:disabled { opacity: .4; cursor: default; }
+.codec-panel .codec-btn-quiet { background: transparent; color: var(--codec-fg); border: 1px solid var(--codec-line); }
+.codec-panel .codec-btn[hidden] { display: none; }
+.codec-panel .codec-note { margin: 10px 0 0; font-size: 12px; color: var(--codec-dim); }
+.codec-panel .codec-log { width: 100%; border-collapse: collapse; font-size: 13px; }
+.codec-panel .codec-log th { text-align: left; color: var(--codec-dim); font-weight: normal; border-bottom: 1px solid var(--codec-line); padding: 4px 6px; }
+.codec-panel .codec-log td { padding: 6px; border-bottom: 1px solid var(--codec-line); }
+.codec-panel .codec-row { cursor: pointer; }
+.codec-panel .codec-row:hover, .codec-panel .codec-row:focus { background: #0b1d10; outline: none; }
+.codec-panel .codec-freq { color: var(--codec-dim); }
+.codec-panel .codec-ans { color: var(--codec-fg); }
+.codec-panel .codec-miss { color: var(--codec-warn); }
+.codec-panel .codec-empty { color: var(--codec-dim); }
+@media (max-width: 480px) {
+  .codec-panel .codec-log th:nth-child(3), .codec-panel .codec-log td:nth-child(3) { display: none; }
+}

@@ -1,0 +1,4 @@
+flask>=2.2
+pywebpush>=2.0
+# only for tools/make_assets.py
+pillow>=9.0

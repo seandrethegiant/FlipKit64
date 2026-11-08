@@ -1,0 +1,12 @@
+# Your own call sounds stay on your PC (see static/codec/sounds/README.md)
+static/codec/sounds/*
+!static/codec/sounds/README.md
+# Never commit Codec secrets if MAGI_CODEC_DIR points inside the repo
+codec_data/
+config.json
+vapid_private.pem
+subscriptions.json
+calls.json
+state.json
+__pycache__/
+*.pyc
