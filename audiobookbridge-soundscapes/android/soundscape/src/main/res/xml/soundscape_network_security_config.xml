@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  EXAMPLE ONLY. The PC serves timelines over plain HTTP inside your tailnet.
+  Android blocks cleartext HTTP by default (API 28+). If the app does not
+  already allow cleartext (many Jellyfin setups do, for LAN servers), merge
+  this into the app's own network security config and reference it from the
+  app manifest:  <application android:networkSecurityConfig="@xml/...">
+
+  Tailscale MagicDNS names end in .ts.net. If you use the raw 100.x.y.z IP
+  instead, a domain entry cannot match an IP range: either use the MagicDNS
+  name (recommended) or add the exact IP as a domain entry.
+-->
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">ts.net</domain>
+    </domain-config>
+</network-security-config>
