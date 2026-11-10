@@ -1,0 +1,9 @@
+# PC side of AudiobookBridge soundscapes (Python 3.10+ on Windows).
+# Also needs: ffmpeg on PATH, Ollama running with a 7-8B instruct model.
+faster-whisper>=1.0.3
+numpy
+tqdm
+# CUDA 12 runtime libraries for faster-whisper (CTranslate2) on an RTX GPU.
+# If CUDA still fails to load, see README "CUDA on Windows".
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*

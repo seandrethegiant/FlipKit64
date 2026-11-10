@@ -1,0 +1,9 @@
+# PC generator output and caches (local data, not source)
+pc/cache/
+pc/soundscapes/
+__pycache__/
+*.pyc
+# Android build output
+android/**/build/
+.gradle/
+local.properties

@@ -1,0 +1,44 @@
+{
+ "bookId": "book1",
+ "version": 1,
+ "generator": "soundscape_gen/1.0",
+ "generatedAt": "2026-11-08T10:45:12Z",
+ "title": "Test Book",
+ "durationMs": 1050000,
+ "chapters": [
+  {
+   "id": "t1",
+   "name": "Chapter 1",
+   "durationMs": 780000
+  },
+  {
+   "id": "t2",
+   "name": "Chapter 2",
+   "durationMs": 270000
+  }
+ ],
+ "model": {
+  "whisper": "small",
+  "llm": "llama3.1:8b"
+ },
+ "segments": [
+  {
+   "startMs": 0,
+   "endMs": 240000,
+   "scene": "RAIN",
+   "intensity": 0.6
+  },
+  {
+   "startMs": 240000,
+   "endMs": 600000,
+   "scene": "TAVERN",
+   "intensity": 0.6
+  },
+  {
+   "startMs": 600000,
+   "endMs": 1050000,
+   "scene": "CAVE",
+   "intensity": 0.6
+  }
+ ]
+}
