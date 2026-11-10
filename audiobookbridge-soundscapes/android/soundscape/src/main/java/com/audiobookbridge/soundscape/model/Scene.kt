@@ -11,14 +11,19 @@ enum class Scene(val label: String) {
     FOREST("Forest"),
     NIGHT("Night"),
     OCEAN("Ocean"),
+    RIVER("River"),
+    WINTER("Winter"),
+    WIND("Wind"),
+    TRAVEL("On the road"),
     CITY("City"),
+    VEHICLE("Vehicle"),
     TAVERN("Tavern"),
     FIRE("Fire"),
+    HOME("Home"),
+    ARCHIVE_QUIET("Archive"),
     CAVE("Cave"),
-    WIND("Wind"),
     SPACESHIP("Spaceship"),
-    BATTLE("Battle"),
-    ARCHIVE_QUIET("Archive");
+    BATTLE("Battle");
 
     /** Bundled loop for this scene, relative to the assets root. NONE has none. */
     val assetPath: String?

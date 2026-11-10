@@ -44,8 +44,9 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 # Keep in sync with the app's Scene enum and SceneRules.
-SCENES = ["NONE", "RAIN", "STORM", "FOREST", "NIGHT", "OCEAN", "CITY", "TAVERN",
-          "FIRE", "CAVE", "WIND", "SPACESHIP", "BATTLE", "ARCHIVE_QUIET"]
+SCENES = ["NONE", "RAIN", "STORM", "FOREST", "NIGHT", "OCEAN", "RIVER", "WINTER", "WIND",
+          "TRAVEL", "CITY", "VEHICLE", "TAVERN", "FIRE", "HOME", "ARCHIVE_QUIET", "CAVE",
+          "SPACESHIP", "BATTLE"]
 MIN_SEGMENT_MS = 20_000
 MIN_SWITCH_MS = 45_000
 TIMELINE_VERSION = 1
@@ -54,7 +55,7 @@ WINDOW_S = 60          # scene window length
 CHUNK_S = 600          # transcription chunk length
 SAMPLE_RATE = 16_000   # whisper input rate
 MIN_WORDS = 8          # windows with fewer words keep the previous scene
-PROMPT_VERSION = 2     # bump to invalidate cached labels when the prompt changes
+PROMPT_VERSION = 3     # bump to invalidate cached labels when the prompt changes
 GENERATOR = "soundscape_gen/1.0"
 
 HERE = Path(__file__).resolve().parent
@@ -316,14 +317,19 @@ SCENE_HELP = {
     "FOREST": "woods, jungle, countryside in daytime, birds",
     "NIGHT": "outdoors at night, quiet countryside, camp under the stars",
     "OCEAN": "sea, beach, harbour, aboard a sailing ship",
+    "RIVER": "beside or crossing a river, stream, brook, waterfall, ford",
+    "WINTER": "snow, ice, blizzard, frozen land, cold winter outdoors",
+    "WIND": "open exposed places: mountains, desert, plains, rooftops",
+    "TRAVEL": "journeying on a road or track by horse, cart, wagon or carriage",
     "CITY": "streets, traffic, markets, crowds of a town or city",
+    "VEHICLE": "inside a moving car, truck, bus, train or plane",
     "TAVERN": "inn, pub, bar, feast hall, busy indoor gathering",
     "FIRE": "by a hearth or campfire, or something burning",
+    "HOME": "an ordinary home: kitchen, living room, bedroom, a family house or flat",
+    "ARCHIVE_QUIET": "hushed public or work interiors: library, study, office, museum, archive",
     "CAVE": "caves, tunnels, dungeons, mines, underground",
-    "WIND": "open exposed places: mountains, desert, plains, rooftops",
     "SPACESHIP": "starship, space station, inside advanced machinery",
     "BATTLE": "fighting, war, a skirmish or siege in progress",
-    "ARCHIVE_QUIET": "quiet interiors: library, study, office, bedroom, small talk in a quiet room",
 }
 
 SYSTEM_PROMPT = (

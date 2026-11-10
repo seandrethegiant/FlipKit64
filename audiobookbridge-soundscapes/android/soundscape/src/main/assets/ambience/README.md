@@ -17,6 +17,11 @@ One seamless loop per `Scene` (except `NONE`). File name = scene name in lower c
 | `spaceship.ogg` | SPACESHIP | 2:30 | Generated: engine hum, air vents, rare console blips | CC0 1.0 |
 | `battle.ogg` | BATTLE | 2:30 | Generated: distant crowd shouts, metal clashes, booms | CC0 1.0 |
 | `archive_quiet.ogg` | ARCHIVE_QUIET | 2:30 | Generated: quiet room tone, HVAC hum, page turns | CC0 1.0 |
+| `river.ogg` | RIVER | 2:30 | Generated: rushing water, babbling bubbles | CC0 1.0 |
+| `winter.ogg` | WINTER | 2:30 | Generated: muffled cold wind, blowing snow | CC0 1.0 |
+| `travel.ogg` | TRAVEL | 2:30 | Generated: horse at a walk, creaking cart, gravel road, birds | CC0 1.0 |
+| `vehicle.ogg` | VEHICLE | 2:30 | Generated: engine drone, road roar, tyre noise, bumps | CC0 1.0 |
+| `home.ogg` | HOME | 2:30 | Generated: room tone, clock in the next room, fridge hum, house settling | CC0 1.0 |
 
 All files: Ogg Vorbis, 32 kHz stereo, about -24 dBFS RMS (level-matched, so
 switching scenes does not jump in loudness), peaks under -1 dBFS.
@@ -40,9 +45,9 @@ number of cycles per loop, and one-shot events wrap around the end.
 
 ## Replacing them with recordings
 
-The natural textures (rain, storm, wind, fire, ocean, cave, spaceship,
-archive) hold up well. Tavern, city and battle are approximations; real
-recordings will sound better. To swap one in, keep the same file name, make
+The natural textures (rain, storm, wind, winter, river, fire, ocean, cave,
+spaceship, archive, home) hold up well. Tavern, city, battle, travel and
+vehicle are approximations; real recordings will sound better. To swap one in, keep the same file name, make
 it a seamless 2-5 minute loop, level it to about -24 dBFS RMS, and **update
 the table above** with the source URL, author and licence. Licence-clean
 sources:

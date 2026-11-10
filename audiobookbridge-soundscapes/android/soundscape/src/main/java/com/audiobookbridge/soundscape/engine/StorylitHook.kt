@@ -60,4 +60,9 @@ fun defaultSceneColor(scene: Scene): Int = when (scene) {
     Scene.SPACESHIP -> 0x3AC8D8
     Scene.BATTLE -> 0xB0261E
     Scene.ARCHIVE_QUIET -> 0xD9B77A
+    Scene.RIVER -> 0x4FA3A0
+    Scene.WINTER -> 0xCFE3F5
+    Scene.TRAVEL -> 0xB98A4E
+    Scene.VEHICLE -> 0x6B7A8F
+    Scene.HOME -> 0xF2C38B
 }

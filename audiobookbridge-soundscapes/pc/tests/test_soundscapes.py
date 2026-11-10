@@ -186,5 +186,30 @@ class ServerCoreTests(unittest.TestCase):
             httpd.server_close()
 
 
+class SceneListTests(unittest.TestCase):
+    """The app, the generator, the LLM prompt and the bundled sounds must name the same scenes."""
+    ROOT = Path(__file__).resolve().parents[2]
+
+    def app_scenes(self):
+        import re
+        kt = (self.ROOT / "android/soundscape/src/main/java/com/audiobookbridge/soundscape/model/Scene.kt").read_text()
+        return re.findall(r"^\s+([A-Z_]+)\(\"", kt, re.M)
+
+    def test_app_enum_matches_generator(self):
+        self.assertEqual(set(self.app_scenes()), set(gen.SCENES))
+        self.assertEqual(len(gen.SCENES), len(set(gen.SCENES)))
+
+    def test_every_scene_has_an_llm_description(self):
+        self.assertEqual(set(gen.SCENE_HELP), set(gen.SCENES))
+
+    def test_every_audible_scene_has_a_sound_and_a_synth(self):
+        sys.path.insert(0, str(self.ROOT / "tools"))
+        import make_ambience
+        audible = {s.lower() for s in gen.SCENES if s != "NONE"}
+        self.assertEqual(set(make_ambience.SCENES), audible)
+        assets = self.ROOT / "android/soundscape/src/main/assets/ambience"
+        self.assertEqual({p.stem for p in assets.glob("*.ogg")}, audible)
+
+
 if __name__ == "__main__":
     unittest.main()

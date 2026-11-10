@@ -14,7 +14,7 @@ audiobookbridge-soundscapes/
 │  │  │           SoundscapeController, StorylitHook
 │  │  ├─ net/     TimelineRepository (HttpURLConnection, cache, ETag)
 │  │  └─ ui/      SoundscapePlayerControls (chip + picker sheet), SoundscapeSettingsSection
-│  ├─ src/main/assets/ambience/        13 seamless CC0 loops + README (sources/licences)
+│  ├─ src/main/assets/ambience/        18 seamless CC0 loops + README (sources/licences)
 │  └─ src/test/                        JVM unit tests (28)
 ├─ pc/
 │  ├─ soundscape_gen.py                Jellyfin → faster-whisper → Ollama → soundscapes/<id>.json
@@ -228,6 +228,7 @@ In the app: Settings → Soundscapes → PC URL
 
 - [ ] Play any book. Tap the **♪ Ambience** chip, pick **Rain**: rain fades in over ~4 s, quietly under the voice.
 - [ ] Pick **Tavern** while rain plays: a smooth ~4 s crossfade, no gap, no loudness jump.
+- [ ] Try each of the 18 scenes once; none is noticeably louder or harsher than the rest.
 - [ ] Tap through 4-5 scenes quickly: it ends on the last one, no clicks or stacking.
 - [ ] Pick **Off**: ambience fades out over ~4 s.
 - [ ] Pause the book: ambience stops at once. Resume: it comes back. Pause in the middle of a crossfade, wait 10 s, resume: the fade finishes.
@@ -262,6 +263,7 @@ In the app: Settings → Soundscapes → PC URL
 - [ ] `--all-new` processes only books without a JSON.
 - [ ] From the phone's browser (on Tailscale): `http://<pc>.ts.net:8642/soundscapes/<id>.json` shows JSON; `http://<pc>.ts.net:8642/` is 404; Magi's dashboard is **not** reachable over Tailscale.
 - [ ] Phone: open that book → Auto scenes follow the story.
+- [ ] Timelines made before the River/Winter/Travel/Vehicle/Home scenes existed still load; rebuild them with `--force` to use the new scenes.
 
 ### Phase 4: Storylit (later)
 

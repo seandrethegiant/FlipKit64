@@ -27,7 +27,8 @@ from pathlib import Path
 import numpy as np
 
 SCENES = ["rain", "storm", "forest", "night", "ocean", "city", "tavern", "fire",
-          "cave", "wind", "spaceship", "battle", "archive_quiet"]
+          "cave", "wind", "spaceship", "battle", "archive_quiet",
+          "river", "winter", "travel", "vehicle", "home"]
 
 
 class Gen:
@@ -332,6 +333,88 @@ def archive_quiet(g: Gen):
     return tone + np.stack([hvac, hvac], 1) + g.pan(pages, g.rng.uniform(-0.6, 0.6))
 
 
+def river(g: Gen):
+    """Babbling stream: dense tiny bubbles over a rushing water bed."""
+    rush = g.stereo(lambda: g.noise(g.band(250, 5000, 0.7)))
+    rush *= (0.75 + 0.25 * g.wander(1.5))[:, None]        # fast, uneven flow
+    low = g.stereo(lambda: g.noise(g.band(40, 300, 1.2))) * 0.5
+    bubbles = np.zeros((g.n, 2))
+    def bubble():
+        f = g.rng.uniform(500, 2500)
+        d = g.rng.uniform(0.01, 0.04)
+        return g.tone(d, f, f * g.rng.uniform(1.3, 2.2), d / 3, 0.001)  # rising pitch, like real bubbles
+    for ch in range(2):
+        g.scatter(bubbles[:, ch], bubble, 60, (0.05, 0.4))
+    return 0.6 * rush + low + bubbles
+
+
+def winter(g: Gen):
+    """Muffled cold wind with a soft hiss of blowing snow."""
+    gust = np.clip(0.45 + 0.55 * g.wander(0.05), 0.05, 1.0)
+    body = g.stereo(lambda: g.noise(g.band(50, 350, 1.4))) * (0.4 + 0.6 * gust)[:, None]
+    snow = g.stereo(lambda: g.noise(g.band(3000, 9000, 0.2))) * (0.08 + 0.12 * gust ** 2)[:, None]
+    moan = g.stereo(lambda: g.noise(g.band(380, 460, 0.0))) * (0.25 * gust ** 3)[:, None]
+    return body + snow + moan
+
+
+def travel(g: Gen):
+    """On the road: horse at a walk, creaking cart, gravel, the odd bird."""
+    road = g.stereo(lambda: g.noise(g.band(80, 2500, 1.1))) * 0.25
+    hooves = np.zeros(g.n)
+    step = g.n / round(g.n / g.sr / 0.55)               # ~1.8 steps/s, a whole number per loop
+    for k in range(int(round(g.n / step))):
+        pos = int(k * step + g.rng.normal(0, 0.012) * g.sr)
+        clop = g.burst(0.09, 300, g.rng.uniform(1800, 2600), 0.001, 0.018)
+        clop[: int(0.03 * g.sr)] += 0.4 * g.tone(0.03, g.rng.uniform(180, 240), None, 0.012, 0.001)
+        g.place(hooves, clop, pos, g.rng.uniform(0.5, 1.0) * (1.0 if k % 2 else 0.8))
+    hooves = 0.7 * hooves + 0.3 * g.reverb(hooves, 0.3, 200, 5000)
+    creak = np.zeros(g.n)
+    wheel = g.n / round(g.n / g.sr / 1.6)               # one creak per wheel turn
+    for k in range(int(round(g.n / wheel))):
+        if g.rng.random() < 0.7:
+            d = g.rng.uniform(0.15, 0.35)
+            c = g.tone(d, g.rng.uniform(260, 420), g.rng.uniform(220, 380), d / 2, 0.03,
+                       ((1, 1), (2, 0.5), (3, 0.3), (4.1, 0.2)))
+            c *= 1 + 0.6 * np.sin(2 * np.pi * g.rng.uniform(25, 45) * np.arange(c.size) / g.sr)  # rough, grainy
+            g.place(creak, c, int(k * wheel), g.rng.uniform(0.04, 0.09))
+    birds = np.zeros((g.n, 2))
+    birdsong(g, birds, 0.08)
+    return road + g.pan(hooves, -0.1) + g.pan(g.filt(creak, 150, 3000), 0.25) + birds
+
+
+def vehicle(g: Gen):
+    """Inside a moving car or train: engine drone, road roar, small bumps."""
+    t = g.t
+    drone = sum(a * np.sin(2 * np.pi * g.q(f) * t + g.rng.uniform(0, 6.28))
+                for f, a in [(38, 1.0), (76, 0.5), (114, 0.25), (152, 0.12)])
+    drone = drone * (0.85 + 0.15 * g.wander(0.04))
+    roar = g.stereo(lambda: g.noise(g.band(30, 700, 1.5))) * (0.9 + 0.1 * g.wander(0.2))[:, None]
+    tyres = g.stereo(lambda: g.noise(g.band(700, 4000, 0.8))) * 0.18
+    bumps = np.zeros(g.n)
+    g.scatter(bumps, lambda: g.burst(0.25, 30, 250, 0.005, 0.06), 0.4, (0.3, 1.0))
+    return 0.35 * np.stack([drone, drone], 1) + roar + tyres + g.pan(bumps, 0.0)
+
+
+def home(g: Gen):
+    """A lived-in room: soft room tone, a distant clock, fridge hum, house settling."""
+    tone = g.stereo(lambda: g.noise(g.band(40, 900, 1.6))) * 0.4
+    fridge = (np.sin(2 * np.pi * g.q(100) * g.t) * 0.02 + np.sin(2 * np.pi * g.q(200) * g.t) * 0.008)
+    fridge = fridge * np.clip(0.5 + g.lfo(1), 0, 1)       # cycles on and off once per loop
+    clock = np.zeros(g.n)
+    period = g.n / round(g.n / g.sr)                      # exactly one tick per second
+    for k in range(int(round(g.n / period))):
+        tick = g.burst(0.02, 1500, 6000, 0.0003, 0.003) * (1.0 if k % 2 else 0.7)  # tick / tock
+        g.place(clock, tick, int(k * period), 1.0)
+    clock = g.reverb(g.filt(clock, 800, 5000), 0.5) * 0.25  # in the next room
+    creaks = np.zeros(g.n)
+    g.scatter(creaks, lambda: g.burst(g.rng.uniform(0.15, 0.4), 120, 900, 0.02, 0.08), 1 / 25, (0.1, 0.25))
+    kitchen = np.zeros(g.n)
+    g.scatter(kitchen, lambda: g.tone(0.3, g.rng.uniform(1400, 2600), None, 0.06, 0.001,
+                                      ((1, 1), (2.7, 0.4))), 1 / 20, (0.02, 0.05))
+    far = g.reverb(g.filt(creaks + kitchen, 100, 3000), 0.9)
+    return tone + np.stack([fridge, fridge], 1) + g.pan(clock, 0.35) + g.pan(far, -0.3)
+
+
 BUILDERS = {name: globals()[name] for name in SCENES}
 
 
@@ -380,7 +463,7 @@ def main():
     for i, name in enumerate(names):
         if name not in BUILDERS:
             sys.exit(f"unknown scene {name}")
-        g = Gen(args.seconds, args.rate, args.seed + i * 1000)
+        g = Gen(args.seconds, args.rate, args.seed + SCENES.index(name) * 1000)  # stable per scene
         x = master(BUILDERS[name](g))
         out = args.out_dir / f"{name}.ogg"
         write_ogg(x, args.rate, out, args.quality)
