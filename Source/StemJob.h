@@ -7,7 +7,7 @@
 // on a background thread, with a progress window (and Cancel) on screen. It owns itself and
 // reports back on the message thread. Only one runs at a time.
 //
-// The four stems are written as 24-bit WAVs into  Recordings/Edits/<name> stems/ .
+// The six stems are written as 24-bit WAVs into  Recordings/Edits/<name> stems/ .
 // ---------------------------------------------------------------------------------------------
 class StemJob : private juce::Thread, private juce::Timer
 {

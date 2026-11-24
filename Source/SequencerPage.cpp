@@ -174,7 +174,7 @@ void StepGrid::paint (Graphics& g)
                 const String tag = cd != Seq::always ? String (Seq::condShort (cd)) : (ch < 100 ? String (ch) + "%" : String());
                 if (tag.isNotEmpty())
                 {
-                    g.setColour (Colour (0xff120c1c));
+                    g.setColour (ink);
                     g.setFont (Font (9.5f, Font::bold));
                     g.drawText (tag, cell.reduced (4.0f, 0.0f), Justification::centred);
                 }
@@ -214,7 +214,7 @@ void StepGrid::paint (Graphics& g)
         g.setColour (kt.sourcePad.load() >= 0 ? text : muted);
         g.setFont (Font (12.0f));
         g.drawText (kt.name, 24, y, nameW - 30, laneRowH - 2, Justification::centredLeft);
-        g.setColour (Colour (0xff1b1430));
+        g.setColour (well());
         g.fillRect ((float) nameW, (float) y, cw * 16.0f, (float) laneRowH - 2.0f);
         const auto& ln = pat.lanes[t];
         auto notes = ln.get();
@@ -543,7 +543,12 @@ SequencerPage::SequencerPage (EditorContext& c) : ctx (c), proc (c.getProc())
     {
         patButtons[i].setButtonText (String (i + 1));
         styleButton (patButtons[i]);
-        patButtons[i].onClick = [this, i] { proc.selectPattern (i); syncPatternControls(); };
+        patButtons[i].onClick = [this, i]
+        {
+            if (proc.songMode.load() && proc.song.rows() > 0 && (proc.hostPlaying.load() || proc.internalPlaying.load()))
+                setStatus ("Song mode is playing: the song picks the patterns. Turn Song mode off to switch by hand.");
+            proc.selectPattern (i); syncPatternControls();
+        };
         addAndMakeVisible (patButtons[i]);
     }
 
@@ -611,11 +616,29 @@ SequencerPage::SequencerPage (EditorContext& c) : ctx (c), proc (c.getProc())
         auto& b = trackButtons[i];
         styleButton (b);
         b.setColour (TextButton::buttonOnColourId, (i == 0 ? accent : KeysUI::trackColour (i - 1)).withAlpha (0.85f));
-        b.setColour (TextButton::textColourOnId, Colour (0xff120c1c));
+        b.setColour (TextButton::textColourOnId, ink);
         b.setTooltip (i == 0 ? String ("The drum pads' step grid") : "A melodic track: one pad's sound played across the keyboard");
         b.onClick = [this, i] { selectTrack (i); };
         addAndMakeVisible (b);
     }
+    styleButton (songTab);
+    songTab.setColour (TextButton::buttonOnColourId, zoneYellow.withAlpha (0.85f));
+    songTab.setColour (TextButton::textColourOnId, Colour (0xff120c1c));
+    songTab.setTooltip ("Song: chain patterns into a whole track (pattern x repeats, top to bottom)");
+    songTab.onClick = [this] { showSong(); };
+    addAndMakeVisible (songTab);
+    styleButton (songModeButton);
+    songModeButton.setClickingTogglesState (true);
+    songModeButton.setColour (TextButton::buttonOnColourId, zoneYellow.withAlpha (0.85f));
+    songModeButton.setTooltip ("Song mode: play the song (Song tab) instead of the selected pattern");
+    songModeButton.onClick = [this]
+    {
+        songPanel.setSongMode (songModeButton.getToggleState());
+        if (songModeButton.getToggleState() && ! songView) setStatus ("Song mode on: the Song tab's rows play in order. Edit them in the Song tab.");
+    };
+    addAndMakeVisible (songModeButton);
+    songPanel.onStatus = [this] (const String& m) { setStatus (m); };
+    addChildComponent (songPanel);
     soundLabel.setText ("Sound", dontSendNotification); styleLabel (soundLabel, 11.0f); addChildComponent (soundLabel);
     soundBox.setTooltip ("The pad this track plays, pitched across the keyboard (it keeps that pad's tuning, envelope and filter)");
     soundBox.onChange = [this]
@@ -647,6 +670,10 @@ SequencerPage::SequencerPage (EditorContext& c) : ctx (c), proc (c.getProc())
     glideSlider.setTooltip ("Mono only: slide from one note to the next");
     glideSlider.onValueChange = [this] { if (selectedTrack > 0) proc.keysTracks[selectedTrack - 1].glideMs = (float) glideSlider.getValue(); };
     addChildComponent (glideSlider);
+    styleButton (midiOutButton);
+    midiOutButton.setTooltip ("Send this track's notes to a hardware synth (e.g. an M-Vave FM-1 on USB): pick the device and a MIDI channel");
+    midiOutButton.onClick = [this] { showMidiOutMenu(); };
+    addChildComponent (midiOutButton);
     for (int r = 0; r < 12; ++r) scaleRootBox.addItem (MidiMessage::getMidiNoteName (r, true, false, 3), r + 1);
     for (int s = 0; s < Keys::numScales; ++s) scaleTypeBox.addItem (Keys::scaleName (s), s + 1);
     scaleRootBox.setTooltip ("Key: highlights its notes in the piano roll");
@@ -736,8 +763,9 @@ void SequencerPage::syncTrackControls()
         trackButtons[i].setButtonText (i == 0 ? String ("Drums") : proc.keysTracks[i - 1].name);
         trackButtons[i].setToggleState (i == selectedTrack, dontSendNotification);
     }
+    if (songView) { syncSongView(); return; }
     const bool keys = selectedTrack > 0;
-    for (Component* c : std::initializer_list<Component*> { &soundLabel, &soundBox, &rootLabel, &rootBox, &monoToggle })
+    for (Component* c : std::initializer_list<Component*> { &soundLabel, &soundBox, &rootLabel, &rootBox, &monoToggle, &midiOutButton })
         c->setVisible (keys);
     if (! keys) { glideSlider.setVisible (false); return; }
     const auto& kt = proc.keysTracks[selectedTrack - 1];
@@ -749,11 +777,112 @@ void SequencerPage::syncTrackControls()
     glideSlider.setVisible (kt.mono.load());
     scaleRootBox.setSelectedId (proc.scaleRoot.load() + 1, dontSendNotification);
     scaleTypeBox.setSelectedId (proc.scaleType.load() + 1, dontSendNotification);
+    updateMidiOutButton();
+}
+
+void SequencerPage::updateMidiOutButton()
+{
+    if (selectedTrack <= 0) return;
+    const int ch = proc.keysTracks[selectedTrack - 1].midiChannel.load();
+    String t = "MIDI out: off";
+    if (ch > 0)
+    {
+        t = "MIDI out: ch " + String (ch);
+        if (! proc.extMidi.isOpen()) t << " (no device)";
+    }
+    midiOutButton.setButtonText (t);
+    midiOutButton.setToggleState (ch > 0 && proc.extMidi.isOpen(), dontSendNotification);
+}
+
+void SequencerPage::showMidiOutMenu()
+{
+    if (selectedTrack <= 0) return;
+    const int t = selectedTrack - 1;
+    auto& kt = proc.keysTracks[t];
+    const int ch = kt.midiChannel.load();
+    const auto devices = ExternalMidi::deviceNames();
+    const String openName = proc.extMidi.deviceName();
+
+    PopupMenu m, chans, devs, timing;
+    m.addSectionHeader (kt.name + ": send its notes to a synth");
+    m.addItem (100, "Off (play the pad's sound)", true, ch == 0);
+    for (int c = 1; c <= 16; ++c) chans.addItem (100 + c, "Channel " + String (c), true, ch == c);
+    m.addSubMenu ("MIDI channel" + String (ch > 0 ? " (" + String (ch) + ")" : String()), chans);
+    m.addItem (120, "Play the pad's sound too", ch > 0, kt.midiSound.load());
+
+    m.addSectionHeader ("Device (all Keys tracks)");
+    devs.addItem (199, "None", true, openName.isEmpty());
+    for (int i = 0; i < devices.size(); ++i) devs.addItem (200 + i, devices[i], true, devices[i] == openName);
+    if (proc.midiOutWanted.isNotEmpty() && openName.isEmpty())
+        devs.addItem (198, proc.midiOutWanted + " (not connected)", false, false);
+    if (devices.isEmpty()) devs.addItem (197, "No MIDI outputs found - plug the synth in", false, false);
+    m.addSubMenu ("MIDI out device: " + (openName.isNotEmpty() ? openName : String ("none")), devs);
+    m.addItem (130, "Send MIDI clock (synth's arp / sequencer follows the tempo)", true, proc.midiClockOut.load());
+    const int off = roundToInt (proc.extMidi.offsetMs.load());
+    for (int ms : { -20, -10, -5, 0, 5, 10, 20, 40 })
+        timing.addItem (300 + ms + 100, ms == 0 ? String ("On time") : (ms < 0 ? String (-ms) + " ms earlier" : String (ms) + " ms later"), true, off == ms);
+    m.addSubMenu ("Timing" + String (off != 0 ? " (" + String (off > 0 ? "+" : "") + String (off) + " ms)" : String()), timing);
+    m.addItem (140, "Stop stuck notes on the synth", proc.extMidi.isOpen());
+
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (&midiOutButton),
+                     [this, t, devices, safe = Component::SafePointer<SequencerPage> (this)] (int r)
+    {
+        if (safe == nullptr || r == 0) return;
+        auto& k = proc.keysTracks[t];
+        if (r >= 100 && r <= 116)
+        {
+            proc.midiOutPanic();                                  // notes on the old channel end now
+            k.midiChannel = r - 100;
+            if (k.midiChannel.load() > 0 && ! proc.extMidi.isOpen() && proc.midiOutWanted.isEmpty() && devices.size() == 1)
+                proc.setMidiOutDevice (devices[0]);               // only one synth plugged in: use it
+        }
+        else if (r == 120) k.midiSound = ! k.midiSound.load();
+        else if (r == 130) { proc.midiClockOut = ! proc.midiClockOut.load(); }
+        else if (r == 140) proc.midiOutPanic();
+        else if (r == 199) proc.setMidiOutDevice ({});
+        else if (r >= 200 && r < 200 + devices.size())
+        {
+            const auto dev = devices[r - 200];
+            if (! proc.setMidiOutDevice (dev))
+                AlertWindow::showMessageBoxAsync (MessageBoxIconType::WarningIcon, "Couldn't open " + dev,
+                    "Another app may be using it. If LUNA has this device switched on in its MIDI settings, switch it off there "
+                    "(FlipKit64 sends to it directly), then pick it again here.");
+        }
+        else if (r >= 380 && r <= 440) proc.extMidi.offsetMs = (float) (r - 400);
+        updateMidiOutButton();
+    });
+}
+
+void SequencerPage::showSong()
+{
+    songView = true;
+    syncSongView();
+    hint.setText ("Each row plays a pattern a number of times, top to bottom. Click a pattern number to change a row, - / + (or the wheel) for repeats. "
+                  "Click a row to select it (Play starts there), double-click its number to play from it. In LUNA, bar 1 is row 1.", dontSendNotification);
+    resized();
+}
+
+void SequencerPage::syncSongView()
+{
+    songPanel.setVisible (songView);
+    songTab.setToggleState (songView, dontSendNotification);
+    if (! songView) return;
+    for (auto& b : trackButtons) b.setToggleState (false, dontSendNotification);
+    for (Component* c : std::initializer_list<Component*> { &viewport, &stepPanel, &allPadsToggle, &tempoPadToggle, &followToggle,
+                                                            &rollViewport, &velLane, &notePanel, &scaleRootBox, &scaleTypeBox, &snapToggle,
+                                                            &ghostToggle, &padsPlayToggle, &soundLabel, &soundBox, &rootLabel, &rootBox,
+                                                            &monoToggle, &glideSlider })
+        c->setVisible (false);
+    for (auto& pb : pageButtons) pb.setVisible (false);
+    songPanel.tick();
 }
 
 void SequencerPage::selectTrack (int t)
 {
     selectedTrack = jlimit (0, Keys::numTracks, t);
+    songView = false;
+    songPanel.setVisible (false);
+    songTab.setToggleState (false, dontSendNotification);
     const bool keys = selectedTrack > 0;
     viewport.setVisible (! keys);
     stepPanel.setVisible (! keys);
@@ -814,7 +943,7 @@ void SequencerPage::setPage (int p)
     const int pages = pageCount();
     for (int i = 0; i < 4; ++i)
     {
-        pageButtons[i].setVisible (pages > 1 && i < pages);
+        pageButtons[i].setVisible (! songView && pages > 1 && i < pages);
         pageButtons[i].setToggleState (i == grid.page, dontSendNotification);
     }
     grid.repaint(); roll.repaint(); velLane.repaint();
@@ -851,6 +980,10 @@ void SequencerPage::showTempoPadMenu()
     m.addItem (40, "As played", true, vm == 0);
     m.addItem (41, "Lighter touch (soft hits count louder)", true, vm == 1);
     m.addItem (42, "Full level (every hit at full volume)", true, vm == 2);
+    m.addSectionHeader ("Other pad controllers (MIDI learn)");
+    m.addItem (50, "Learn pads in order, from the selected pad...");
+    m.addItem (51, "Learn just the selected pad...");
+    m.addItem (52, "Back to the TempoPAD layout", ! proc.padNotesAreDefault());
     m.addSectionHeader ("Play, Stop and Record buttons");
     auto describe = [this] (int b)
     {
@@ -876,6 +1009,8 @@ void SequencerPage::showTempoPadMenu()
             return;
         }
         if (r >= 40 && r <= 42) { ctx.velocityModeChanged (r - 40); return; }
+        if (r == 50 || r == 51) { ctx.learnPadNotes (ctx.getSelectedPad(), r == 50); return; }
+        if (r == 52) { proc.resetPadNotes(); ctx.padNotesChanged(); return; }
         if (r == 30)
         {
             const bool on = ! proc.midiLog.load();
@@ -962,7 +1097,9 @@ void SequencerPage::tick()
         teachWindow->exitModalState (1);
         teachWindow.reset();
     }
-    proc.keysInput = (isShowing() && selectedTrack > 0 && padsPlayToggle.getToggleState()) ? selectedTrack - 1 : -1;
+    proc.keysInput = (isShowing() && ! songView && selectedTrack > 0 && padsPlayToggle.getToggleState()) ? selectedTrack - 1 : -1;
+    songModeButton.setToggleState (proc.songMode.load(), dontSendNotification);
+    if (songView) songPanel.tick();
     proc.drainKeyRecordings();
     if (proc.keysRecorded.load() != lastKeysRecorded) { lastKeysRecorded = proc.keysRecorded.load(); roll.repaint(); velLane.repaint(); grid.repaint(); }
     if (selectedTrack > 0)
@@ -1051,6 +1188,7 @@ void SequencerPage::resized()
     resBox.setBounds (row2.removeFromLeft (110)); row2.removeFromLeft (10);
     swingLabel.setBounds (row2.removeFromLeft (44));
     swingSlider.setBounds (row2.removeFromLeft (190));
+    songModeButton.setBounds (row2.removeFromRight (96));
 
     b.removeFromTop (10);
     auto row3 = b.removeFromTop (28);
@@ -1064,13 +1202,16 @@ void SequencerPage::resized()
     b.removeFromTop (10);
     auto row4 = b.removeFromTop (28);
     for (int i = 0; i <= Keys::numTracks; ++i) { trackButtons[i].setBounds (row4.removeFromLeft (i == 0 ? 72 : 84)); row4.removeFromLeft (4); }
+    row4.removeFromLeft (8);
+    songTab.setBounds (row4.removeFromLeft (64)); row4.removeFromLeft (4);
     row4.removeFromLeft (12);
     soundLabel.setBounds (row4.removeFromLeft (40));
     soundBox.setBounds (row4.removeFromLeft (170)); row4.removeFromLeft (10);
     rootLabel.setBounds (row4.removeFromLeft (32));
     rootBox.setBounds (row4.removeFromLeft (66)); row4.removeFromLeft (10);
     monoToggle.setBounds (row4.removeFromLeft (62));
-    glideSlider.setBounds (row4.removeFromLeft (150));
+    glideSlider.setBounds (row4.removeFromLeft (150)); row4.removeFromLeft (10);
+    midiOutButton.setBounds (row4.removeFromLeft (170));
 
     area.removeFromTop (8);
     auto pagesRow = area.removeFromTop (26);
@@ -1100,5 +1241,6 @@ void SequencerPage::resized()
     velLane.setBounds (keysArea.removeFromBottom (58));
     keysArea.removeFromBottom (6);
     rollViewport.setBounds (keysArea);
+    songPanel.setBounds (viewport.getBounds().withRight (side.getRight()).withTop (pagesRow.getY()));
     padsChanged();
 }

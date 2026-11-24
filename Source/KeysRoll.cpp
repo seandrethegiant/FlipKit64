@@ -6,7 +6,7 @@ using namespace UI;
 
 Colour KeysUI::trackColour (int t)
 {
-    static const Colour c[] = { zoneCyan, zoneYellow, zonePurple, zoneBlue };
+    const Colour c[] = { zoneCyan, zoneYellow, zonePurple, zoneBlue };   // not static: follows the theme
     return c[jlimit (0, 3, t)];
 }
 
@@ -108,13 +108,13 @@ void PianoRoll::paint (Graphics& g)
         const int y = yForPitch (p);
         const bool in = Keys::inScale (scale, root, p);
         const bool isRoot = ((p - root) % 12 + 12) % 12 == 0;
-        g.setColour (in ? (isRoot && scale != 0 ? Colour (0xff30264b) : Colour (0xff2a2042)) : Colour (0xff1b1430));
+        g.setColour (in ? (isRoot && scale != 0 ? rowRoot() : rowLit()) : well());
         g.fillRect (keyW, y, w - keyW, rowH);
-        g.setColour (Colour (0xff1a1329));
+        g.setColour (wellEdge());
         g.fillRect (keyW, y + rowH - 1, w - keyW, 1);
 
         const bool black = KeysUI::isBlack (p);
-        g.setColour (black ? Colour (0xff120c1c) : Colour (0xff3a2f55));
+        g.setColour (black ? ink : line);
         g.fillRect (0, y, keyW - 2, rowH - 1);
         if (p % 12 == 0)
         {
@@ -130,7 +130,7 @@ void PianoRoll::paint (Graphics& g)
         const int step = page * 16 + c;
         const float x = keyW + c * cw;
         if (step >= len) { g.setColour (bg.withAlpha (0.75f)); g.fillRect (x, (float) clip.getY(), cw, (float) clip.getHeight()); }
-        g.setColour (step % spb == 0 ? line.brighter (0.15f) : Colour (0xff241b3a));
+        g.setColour (step % spb == 0 ? line.brighter (0.15f) : gridLine());
         g.fillRect (x, (float) clip.getY(), step % spb == 0 ? 1.5f : 1.0f, (float) clip.getHeight());
     }
 
@@ -171,7 +171,7 @@ void PianoRoll::paint (Graphics& g)
             g.fillRect (r.getRight() - 4.0f, r.getY(), 4.0f, r.getHeight());       // the resize edge
             if (r.getWidth() > 28.0f)
             {
-                g.setColour (Colour (0xff120c1c));
+                g.setColour (ink);
                 g.setFont (Font (9.5f, Font::bold));
                 g.drawText (KeysUI::noteName (n.pitch), r.reduced (5.0f, 0.0f), Justification::centredLeft);
             }
@@ -285,7 +285,7 @@ void PianoRoll::mouseUp (const MouseEvent&)
 
 void VelocityLane::paint (Graphics& g)
 {
-    g.setColour (Colour (0xff1b1430));
+    g.setColour (well());
     g.fillRoundedRectangle (getLocalBounds().toFloat(), 5.0f);
     g.setColour (muted);
     g.setFont (Font (10.0f));

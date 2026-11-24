@@ -24,7 +24,7 @@ void StemJob::cancelAndWait()
 StemJob::StemJob (const SamplePtr& s, Done d) : Thread ("FlipKit64 stem separation"), source (s), done (std::move (d))
 {
     const bool needModel = ! StemSeparator::modelPresent();
-    phaseText = needModel ? "Downloading the model (one time, about 91 MB)..." : "Loading the model...";
+    phaseText = needModel ? "Downloading the model (one time, about 110 MB)..." : "Loading the model...";
     shownPhase = phaseText;
 
     auto* w = new AlertWindow ("Splitting into stems",
@@ -90,7 +90,7 @@ void StemJob::run()
 
     if (error.isEmpty())
     {
-        setPhase ("Separating drums, bass, other and vocals...");
+        setPhase ("Separating drums, bass, vocals, guitar, piano and the rest...");
         error = sep.separate (source->audio, source->sampleRate, raw, [this] (float f) { return progress (f); });
     }
     for (auto& w : writers) w.reset();      // flush and close

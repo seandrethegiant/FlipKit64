@@ -2,9 +2,11 @@
 #include "../Source/SamplerPage.h"
 #include "../Source/Network.h"
 #include "../Source/PluginEditor.h"
+#include <map>
 #include "../Source/Lights.h"
 #include "../Source/KitFill.h"
 #include "../Source/SampleSearch.h"
+#include "../Source/SongPanel.h"
 #include <cstdio>
 using namespace juce;
 
@@ -268,6 +270,73 @@ int main (int, char** argv)
         run (q, 375, -1, 1, &ph);
         check (hits (q, 36) == hi + 1, "internal transport plays the pattern on its own");
         q.internalPlaying = false;
+        q.setPlayHead (nullptr);
+    }
+
+    {   // ---------------- song mode: rows of pattern x repeats, locked to the transport
+        double beats[Seq::numPatterns] = { 4, 8, 4, 4, 4, 4, 4, 4 };
+        Song::Data d; d.insert (0, 0, 2); d.insert (1, 1, 1);
+        Song::Snapshot s; s.take (d, beats, Seq::numPatterns, true);
+        check (s.total() == 16.0, "song: 2 x 1 bar + 1 x 2 bars = 16 beats");
+        auto l0 = Song::locate (s, 7.99), l1 = Song::locate (s, 8.0), l2 = Song::locate (s, 17.0);
+        check (l0.row == 0 && l1.row == 1 && l1.start == 8.0 && l1.pattern == 1, "song: locate finds the row at a position");
+        check (l2.row == 0 && l2.pass == 1 && l2.start == 16.0, "song: loops back to row 1");
+        s.loop = false;
+        check (! Song::locate (s, 16.0).valid() && Song::locate (s, 15.9).row == 1, "song: Loop off ends after the last row");
+        int seen = 0; s.loop = true;
+        Song::forEachRow (s, 7.0, 17.0, [&] (const Song::Placed&) { ++seen; });
+        check (seen == 3, "song: rows overlapping a range, across the loop");
+        d.swap (0, 1); d.remove (1);
+        check (d.rows() == 1 && d.pattern[0].load() == 1, "song: swap and remove rows");
+
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        q.assignRegion (A, makeTone (0.05, 1000.0f), 0, 1, "a");
+        q.assignRegion (B, makeTone (0.05, 1000.0f), 0, 1, "b");
+        q.patterns[0].vel[A][0] = 100;                          // pattern 1: A on beat 1, 1 bar
+        q.patterns[1].length = 32; q.patterns[1].vel[B][0] = 100;   // pattern 2: B on beat 1, 2 bars
+        q.song.insert (0, 0, 2); q.song.insert (1, 1, 1);
+        q.songMode = true;
+        FakePlayHead ph; q.setPlayHead (&ph);
+        const uint32_t a0 = hits (q, 36), b0 = hits (q, 37);
+        while (ph.ppq < 7.9) run (q, 1, -1, 1, &ph);
+        check (hits (q, 36) - a0 == 2 && hits (q, 37) == b0 && q.currentPattern.load() == 0, "song: row 1 plays pattern 1 twice");
+        while (ph.ppq < 15.9) run (q, 1, -1, 1, &ph);
+        check (hits (q, 36) - a0 == 2 && hits (q, 37) - b0 == 1 && q.currentPattern.load() == 1 && q.songRow.load() == 1,
+               "song: row 2 plays pattern 2 once (its 2 bars)");
+        while (ph.ppq < 16.1) run (q, 1, -1, 1, &ph);
+        check (hits (q, 36) - a0 == 3 && q.songRow.load() == 0, "song: loops back to row 1");
+
+        q.selectPattern (5);
+        check (q.queuedPattern.load() == -1, "song: pattern buttons don't queue while the song plays");
+
+        ph.ppq = 9.0; run (q, 2, -1, 1, &ph);                  // jump into the middle of row 2 (scrubbing in LUNA)
+        check (q.currentPattern.load() == 1 && q.songRow.load() == 1 && q.seqOrigin.load() == 8.0, "song: a jump lands on the right row");
+
+        q.seqRecord = true;                                     // live record counts steps from the row's start
+        while (ph.ppq < 9.24) run (q, 1, -1, 1, &ph);
+        run (q, 1, 36, 0.8f, &ph);
+        q.seqRecord = false;
+        check (q.patterns[1].vel[A][5].load() > 0 && q.patterns[0].vel[A][5].load() == 0, "song: live record goes into the row's pattern at its own step");
+        q.patterns[1].vel[A][5] = 0;
+
+        // a Keys track in one of the song's patterns, then save / load
+        q.keysTracks[0].sourcePad = A;
+        q.patterns[1].lanes[0].set (q.makeNotes ({ { 60, 0, 16, 100 } }));
+        auto xml = q.kitToXml();
+        PadRomplerProcessor r; r.kitFromXml (*xml);
+        check (r.song.rows() == 2 && r.song.pattern[1].load() == 1 && r.song.repeats[0].load() == 2 && r.songMode.load() && r.songLoop.load(),
+               "song: saved with the kit");
+        xml->getChildByName ("Sequencer")->removeChildElement (xml->getChildByName ("Sequencer")->getChildByName ("Song"), true);
+        r.kitFromXml (*xml);
+        check (r.song.rows() == 0 && ! r.songMode.load(), "song: kits without a song load with song mode off");
+
+        // own transport: Play starts from the chosen row; Loop off stops at the end
+        ph.playing = false; run (q, 2, -1, 1, &ph);
+        q.songLoop = false; q.songCursor = 1; q.internalBpm = 120.0; q.internalPlaying = true;
+        run (q, 2, -1, 1, &ph);
+        check (q.songRow.load() == 1 && q.currentPattern.load() == 1, "song: Play starts from the chosen row");
+        run (q, (int) (8.2 * 0.5 * SR / BS), -1, 1, &ph);       // 8 beats at 120 BPM = 4 s, plus a little
+        check (! q.internalPlaying.load(), "song: with Loop off the sequencer stops after the last row");
         q.setPlayHead (nullptr);
     }
 
@@ -1075,6 +1144,34 @@ int main (int, char** argv)
     }
    #endif
     if (std::getenv ("DISPLAY") != nullptr)
+    {   // ---------------- Song tab
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        std::unique_ptr<AudioProcessorEditor> base (q.createEditor());
+        auto* ed = dynamic_cast<PadRomplerEditor*> (base.get());
+        ed->setSize (1280, 780);
+        ed->showTab (2);
+        SequencerPage* sq = nullptr;
+        for (auto* c : ed->getChildren()) if (auto* x = dynamic_cast<SequencerPage*> (c)) sq = x;
+        q.patterns[1].length = 32;
+        for (auto [p, r] : { std::pair { 0, 4 }, { 1, 2 }, { 2, 4 }, { 1, 1 }, { 3, 2 } }) q.song.insert (q.song.rows(), p, r);
+        q.songMode = true; q.songCursor = 2; q.songRow = 1;
+        sq->showSong();
+        sq->tick();
+        SongPanel* panel = nullptr;
+        for (auto* c : sq->getChildren()) if (auto* x = dynamic_cast<SongPanel*> (c)) panel = x;
+        auto gridShown = [&] { return sq->getGrid().findParentComponentOfClass<Viewport>()->isVisible(); };
+        check (panel != nullptr && panel->isVisible() && ! gridShown(), "song tab: shows the song in place of the grid");
+        sq->selectTrack (0);
+        check (! panel->isVisible() && gridShown(), "song tab: Drums brings the grid back");
+        sq->showSong(); sq->tick();
+        if (auto* shot = std::getenv ("FLIPKIT_SHOTS"))
+        {
+            auto img = ed->createComponentSnapshot (ed->getLocalBounds());
+            PNGImageFormat png; File f = File (shot).getChildFile ("song_tab.png"); f.deleteFile();
+            if (auto os = f.createOutputStream()) png.writeImageToStream (img, *os);
+        }
+    }
+    if (std::getenv ("DISPLAY") != nullptr)
     {   // ---------------- Sampler page: beat-grid chop, chop to pattern, send to Keys, undo (0.9.8)
         PadRomplerProcessor q; q.prepareToPlay (SR, BS);
         std::unique_ptr<AudioProcessorEditor> base (q.createEditor());
@@ -1436,6 +1533,215 @@ int main (int, char** argv)
                "state keeps the stretch settings");
         check (! r.getPad (padOfNote (37))->stretchOn, "state: other pads keep stretch off");
     }
+
+    {   // ---------------- MIDI out: Keys tracks playing a hardware synth (e.g. an M-Vave FM-1)
+        struct Sent { MidiMessage m; double due; };
+        std::vector<Sent> sent;
+        double clockMs = 1000.0;
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        q.extMidi.testClock = [&clockMs] { return clockMs; };
+        q.extMidi.testSink = [&sent] (const MidiMessage& m, double due) { sent.push_back ({ m, due }); };
+        q.assignRegion (A, makeTone (3.0, 440.0f), 0, 1, "keys");
+        q.updatePad (A, [] (PadState& p) { p.play = PlayMode::Hold; });
+        q.keysTracks[0].sourcePad = A; q.keysTracks[0].root = 60;
+        q.keysTracks[0].midiChannel = 2;
+        q.patterns[0].lanes[0].set (q.makeNotes ({ { 72, 2, 2, 110 } }));   // 1/8 steps: beat 1.0, one beat long
+        FakePlayHead ph; q.setPlayHead (&ph);
+        const double blockMs = BS * 1000.0 / SR;
+        auto go = [&] (double seconds, MidiBuffer* first = nullptr)
+        {
+            AudioBuffer<float> b (2, BS); MidiBuffer m; if (first) m = *first;
+            double sum = 0; int n = 0;
+            for (int i = 0; i < (int) std::ceil (seconds * SR / BS); ++i)
+            {
+                q.processBlock (b, m); m.clear();
+                if (ph.playing) ph.ppq += BS * ph.bpm / 60.0 / SR;
+                clockMs += blockMs;
+                for (int s = 0; s < BS; ++s) { sum += b.getSample (0, s) * b.getSample (0, s); ++n; }
+            }
+            q.extMidi.deliver (1.0e18);
+            return (float) std::sqrt (sum / jmax (1, n));
+        };
+        auto count = [&sent] (std::function<bool (const MidiMessage&)> f) { int c = 0; for (auto& x : sent) if (f (x.m)) ++c; return c; };
+
+        const double t0 = clockMs;
+        const float lvl = go (2.2);
+        const Sent* on = nullptr; const Sent* off = nullptr;
+        for (auto& x : sent) { if (x.m.isNoteOn() && on == nullptr) on = &x; else if (x.m.isNoteOff() && off == nullptr) off = &x; }
+        check (on != nullptr && on->m.getChannel() == 2 && on->m.getNoteNumber() == 72 && on->m.getVelocity() == 110,
+               "MIDI out: the Keys note goes out on channel 2 with its pitch and velocity");
+        check (on != nullptr && std::abs (on->due - (t0 + 500.0 + blockMs)) < 2.0,
+               ("MIDI out: on its step (" + String (on != nullptr ? on->due - t0 : -1.0, 1) + " ms)").toRawUTF8());
+        check (off != nullptr && off->m.getNoteNumber() == 72 && on != nullptr && std::abs (off->due - on->due - 500.0) < 2.0,
+               "MIDI out: note-off after the note's length");
+        check (lvl < 1e-5f, "MIDI out: the pad's own sound stays quiet");
+
+        q.keysTracks[0].midiSound = true;
+        ph.playing = false; go (0.05); sent.clear(); ph.ppq = 0.0; ph.playing = true;
+        check (go (2.2) > 0.02f && count ([] (auto& m) { return m.isNoteOn(); }) == 1, "MIDI out: \"Play the pad's sound too\" plays both");
+
+        q.keysTracks[0].midiChannel = 0;
+        ph.playing = false; go (0.05); sent.clear(); ph.ppq = 0.0; ph.playing = true;
+        check (go (2.2) > 0.02f && count ([] (auto& m) { return m.isNoteOn(); }) == 0, "MIDI out off: the track plays here and sends nothing");
+
+        // same key again before the first note ends: the old note-off can't cut the new note
+        q.keysTracks[0].midiChannel = 1; q.keysTracks[0].midiSound = false;
+        q.patterns[0].lanes[0].set (q.makeNotes ({ { 60, 0, 4, 100 }, { 60, 2, 2, 90 } }));
+        ph.playing = false; go (0.05); sent.clear(); ph.ppq = 0.0; ph.playing = true;
+        go (1.2);
+        std::vector<String> seq; for (auto& x : sent) if (x.m.isNoteOnOrOff()) seq.push_back ((x.m.isNoteOn() ? "on" : "off") + String ((int) std::round (x.due - sent[0].due)));
+        const auto got = StringArray (seq.data(), (int) seq.size()).joinIntoString (" ");
+        check (got == "on0 off500 on500 off1000", ("MIDI out: retriggered key stays clean (" + got + ")").toRawUTF8());
+
+        // Stop ends anything still sounding (live notes held from the pads)
+        q.patterns[0].lanes[0].set (nullptr);
+        ph.playing = false; go (0.05); sent.clear(); ph.ppq = 0.0; ph.playing = true;
+        q.keysInput = 0;
+        MidiBuffer live; live.addEvent (MidiMessage::noteOn (1, 64, 1.0f), 0);
+        go (0.2, &live);
+        const bool held = count ([] (auto& m) { return m.isNoteOn() && m.getNoteNumber() == 64; }) == 1
+                       && count ([] (auto& m) { return m.isNoteOff(); }) == 0;
+        ph.playing = false; go (0.05);
+        check (held && count ([] (auto& m) { return m.isNoteOff() && m.getNoteNumber() == 64; }) == 1, "MIDI out: a held note gets its note-off on Stop");
+        q.keysInput = -1;
+
+        // MIDI clock: Start, 24 a beat, Stop
+        q.midiClockOut = true; sent.clear(); ph.ppq = 0.0; ph.playing = true;
+        go (1.0 - 0.5 * BS / SR);                        // just under two beats at 120
+        const int ticks = count ([] (auto& m) { return m.getRawData()[0] == 0xF8; });
+        const bool startFirst = ! sent.empty() && sent[0].m.getRawData()[0] == 0xFA;
+        ph.playing = false; go (0.05);
+        check (startFirst && ticks == 48 && count ([] (auto& m) { return m.getRawData()[0] == 0xFC; }) == 1,
+               ("MIDI clock: Start, 24 ticks a beat, Stop (" + String (ticks) + " ticks)").toRawUTF8());
+        sent.clear(); ph.ppq = 8.0; ph.playing = true; go (0.1); ph.playing = false; go (0.02);
+        check (sent.size() > 2 && sent[0].m.getRawData()[0] == 0xF2 && sent[0].m.getRawData()[1] == 32 && sent[1].m.getRawData()[0] == 0xFB,
+               "MIDI clock: starting mid-song sends Song Position + Continue");
+
+        // saved with the kit / project
+        q.keysTracks[2].midiChannel = 5; q.keysTracks[2].midiSound = true; q.extMidi.offsetMs = 10.0f;
+        MemoryBlock mb; q.getStateInformation (mb);
+        PadRomplerProcessor r; r.setStateInformation (mb.getData(), (int) mb.getSize());
+        check (r.keysTracks[2].midiChannel.load() == 5 && r.keysTracks[2].midiSound.load() && r.keysTracks[0].midiChannel.load() == 1
+               && r.keysTracks[1].midiChannel.load() == 0, "state keeps each Keys track's MIDI out channel");
+        q.newKit();
+        check (q.keysTracks[2].midiChannel.load() == 0 && ! q.keysTracks[2].midiSound.load(), "New kit: MIDI out back to off");
+    }
+    {   // ---------------- colour themes
+        using namespace UI;
+        Theme t = themePresets()[4];   // Daylight
+        t.accent = Colour (0xff123456);
+        const auto back = Theme::fromString (t.toString(), defaultTheme());
+        check (back.sameColours (t) && back.name == t.name, "theme: saved text reads back the same colours");
+        check (Theme::fromString ("name=Custom;bg=zz", defaultTheme()).bg == defaultTheme().bg, "theme: bad colours fall back to the default");
+        check (findPreset ("Purple Night") == &themePresets()[0] && findPreset ("Custom") == nullptr, "theme: presets found by name");
+        bool distinct = true;   // each preset's palette colours must be told apart for re-colouring to work
+        for (auto& p : themePresets())
+            for (size_t i = 0; i < themeSlots().size(); ++i)
+                for (size_t j = i + 1; j < themeSlots().size(); ++j)
+                    if (p.*themeSlots()[i].member == p.*themeSlots()[j].member) distinct = false;
+        check (distinct, "theme: no preset uses the same colour twice");
+    }
+
+    if (std::getenv ("DISPLAY") != nullptr)
+    {   // ---------------- colour themes: live switching re-colours every control
+        using namespace UI;
+        PadRomplerProcessor q; q.prepareToPlay (SR, BS);
+        std::unique_ptr<AudioProcessorEditor> base (q.createEditor());
+        auto* ed = dynamic_cast<PadRomplerEditor*> (base.get());
+        ed->setTheme (defaultTheme(), false);
+        MessageManager::getInstance()->runDispatchLoopUntil (50);
+
+        // every colour set on every control, by component + colour id
+        auto snapshot = [&]
+        {
+            std::map<String, uint32> m;
+            std::function<void (Component&, String)> walk = [&] (Component& c, String path)
+            {
+                auto& props = c.getProperties();
+                for (int i = 0; i < props.size(); ++i)
+                {
+                    const auto n = props.getName (i).toString();
+                    if (n.startsWith ("jcclr_")) m[path + "/" + n] = (uint32) (int) props.getValueAt (i);
+                }
+                int k = 0;
+                for (auto* ch : c.getChildren()) walk (*ch, path + "/" + String (k++));
+            };
+            walk (*ed, "");
+            return m;
+        };
+        auto lafBg = [&] { return ed->getLookAndFeel().findColour (ResizableWindow::backgroundColourId); };
+
+        const auto original = snapshot();
+        ed->setTheme (themePresets()[4], false);       // Daylight
+        const auto light = snapshot();
+        int changed = 0, leftOver = 0;
+        for (auto& [k, v] : original)
+        {
+            if (light.at (k) != v) ++changed;
+            const Colour c (v);
+            if (c == defaultTheme().text || c == defaultTheme().panel.brighter (0.08f) || c == defaultTheme().accent)
+                if (light.at (k) == v) ++leftOver;
+        }
+        std::printf ("  theme: %d control colours, %d changed for Daylight\n", (int) original.size(), changed);
+        check (changed > 50 && leftOver == 0, "theme: switching re-colours the controls (none left in the old palette)");
+        check (lafBg() == themePresets()[4].bg && UI::bg == themePresets()[4].bg, "theme: palette and LookAndFeel follow the theme");
+
+        ed->setTheme (themePresets()[5], false);       // High Contrast, then back
+        ed->setTheme (themePresets()[2], false);
+        ed->setTheme (defaultTheme(), false);
+        check (snapshot() == original && lafBg() == defaultTheme().bg, "theme: switching through themes and back restores every colour exactly");
+
+        Theme custom = defaultTheme(); custom.name = "Custom"; custom.accent = custom.right;   // two slots the same colour
+        ed->setTheme (custom, false);
+        ed->setTheme (defaultTheme(), false);
+        check (snapshot() == original, "theme: a custom theme with repeated colours still switches back cleanly");
+
+        {
+            Theme got; int calls = 0;
+            ThemeEditor te (defaultTheme(), [&] (const Theme& t) { got = t; ++calls; });
+            te.setSize (te.getWidth(), te.getHeight());
+            for (auto* c : te.getChildren())
+                if (auto* sel = dynamic_cast<ColourSelector*> (c)) sel->setCurrentColour (Colour (0xff00ff00));
+            MessageManager::getInstance()->runDispatchLoopUntil (50);
+            check (calls > 0 && got.name == "Custom" && got.bg == Colour (0xff00ff00) && got.accent == defaultTheme().accent,
+                   "theme: the custom editor changes the picked colour (Background first) and nothing else");
+        }
+
+        if (auto* dir = std::getenv ("FLIPKIT_THEME_SHOTS"))
+        {   // screenshots of each theme on each tab (for checking by eye)
+            File out (dir); out.createDirectory();
+            auto clickTab = [&] (const String& name)
+            {
+                for (auto* c : ed->getChildren())
+                    if (auto* b = dynamic_cast<TextButton*> (c))
+                        if (b->getButtonText() == name && b->onClick) b->onClick();
+            };
+            for (auto& t : themePresets())
+                for (auto tab : { "PADS", "SAMPLER", "SEQUENCER" })
+                {
+                    ed->setTheme (t, false);
+                    clickTab (tab);
+                    MessageManager::getInstance()->runDispatchLoopUntil (30);
+                    auto img = ed->createComponentSnapshot (ed->getLocalBounds());
+                    FileOutputStream os (out.getChildFile (t.name.removeCharacters (" ") + "-" + tab + ".png"));
+                    os.setPosition (0); os.truncate();
+                    PNGImageFormat().writeImageToStream (img, os);
+                }
+            clickTab ("PADS");
+            for (int i : { 0, 4 })
+            {
+                ed->setTheme (themePresets()[(size_t) i], false);
+                ThemeEditor te (currentTheme(), nullptr);
+                te.setBounds (0, 0, te.getWidth(), te.getHeight());
+                auto img = te.createComponentSnapshot (te.getLocalBounds());
+                FileOutputStream os (out.getChildFile ("custom-editor-" + String (i) + ".png"));
+                os.setPosition (0); os.truncate();
+                PNGImageFormat().writeImageToStream (img, os);
+            }
+        }
+        ed->setTheme (defaultTheme(), false);
+    }
+
     std::printf ("%d failures\n", fails);
     return fails;
 }

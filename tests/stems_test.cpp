@@ -34,7 +34,7 @@ static float monoMean (const AudioBuffer<float>& b)
 
 struct Stems
 {
-    TemporaryFile files[StemSeparator::numStems] { TemporaryFile (".wav"), TemporaryFile (".wav"), TemporaryFile (".wav"), TemporaryFile (".wav") };
+    TemporaryFile files[StemSeparator::numStems] { TemporaryFile (".wav"), TemporaryFile (".wav"), TemporaryFile (".wav"), TemporaryFile (".wav"), TemporaryFile (".wav"), TemporaryFile (".wav") };
     AudioBuffer<float> out[StemSeparator::numStems];
 
     String run (StemSeparator& sep, const AudioBuffer<float>& in, double sr, StemSeparator::Progress p = {})

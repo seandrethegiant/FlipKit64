@@ -1,7 +1,7 @@
 # FlipKit64
 
 **A free 64-pad drum sampler, slicer and step sequencer (VST3 + standalone, Windows).**
-By seandrethegiant · Version 0.9.10 beta
+By seandrethegiant · Version 0.9.12 beta
 
 FlipKit64 is a pad instrument in the spirit of classic sampling drum machines: drop your samples onto an 8×8 grid of pads, chop loops and records into slices, shape each pad, and sequence it all in sync with your DAW. It works with any MIDI pad controller or keyboard, and the grid follows the common 64-pad "drum rack" note layout (notes 36–99) used by 8×8 pad controllers such as the Synido TempoPAD.
 
@@ -26,6 +26,7 @@ Source code and downloads: https://github.com/seandrethegiant/FlipKit64
 - **Stop sounds** (or Esc) silences everything still playing; stopping the transport (Stop on screen, on the TempoPAD or in LUNA) fades out pad sounds too
 - **Clear all...** clears every pad or starts a new kit (pads, patterns and Keys tracks), and offers to save your kit first
 - Click a pad to hear it (lower on the pad = softer)
+- **MIDI learn** (any pad controller): right-click a pad and choose **Learn this pad...**, then hit the pad on your controller that should play it, or **Learn this pad and the ones after it, in order...** to teach a whole row or grid in one go. **Back to the TempoPAD layout** undoes it. Your layout is remembered for every project.
 
 **Sampler**
 - Chop by transients, equal slices, **beat grid** (1 bar, 1/4, 1/8 or 1/16 at the loop's tempo, found from the file name like "88bpm" or from the audio; type it to change it) or by hand
@@ -47,8 +48,13 @@ Source code and downloads: https://github.com/seandrethegiant/FlipKit64
 - **Piano roll** for each Keys track: click to add a note (drag right to make it longer), drag notes to move them, drag their right edge to resize, click a selected note again to remove it; velocity lane underneath; key and scale highlighting with **Snap to scale**; the other Keys tracks show faintly behind
 - Each Keys track has its **own length and step size** (drums 1 bar, keys 2 or 4 bars...) and all of it switches with the pattern; a strip under the drum grid shows every Keys track in time with the drums
 - **Pads play this track**: while a Keys track is shown, the TempoPAD plays it (Key mode gives you a keyboard layout); arm Rec to record notes with their lengths
+- **MIDI out**: send a Keys track to a hardware synth (e.g. an M-Vave FM-1 on USB). Click **MIDI out** on the track row, pick the **device** and a **MIDI channel**; the track's notes (sequenced, auditioned or played from the pads) go straight to the synth, in time. Optional: **Play the pad's sound too**, **Send MIDI clock** (Start / Stop / 24 per beat, so the synth's arp or sequencer follows the tempo) and a **Timing** nudge. Stop sends note-offs for anything still sounding. If the device won't open, switch it off in LUNA's MIDI settings (FlipKit64 talks to it directly).
 - Swing, live recording from your pads (quantized), pattern switching at the bar line
+- **Song mode**: chain patterns into a whole track in the **Song** tab (next to Drums and the Keys tracks). Each row plays a pattern a number of times (x1 to x16), top to bottom: click a row's pattern number to change it, **-** / **+** (or the mouse wheel) for repeats, **Add pattern 1-8** to add rows, **Duplicate**, **Move up / down** and **Delete** to arrange them. Turn on **Song mode** (in the Song tab or the **Song mode** button by the pattern settings) and the rows play in order; **Loop** starts the song again at the end, or with Loop off the sequencer stops. In LUNA the song follows the timeline (bar 1 is row 1), so you can scrub, jump or loop a section and it always lands in the right place; on its own, Play starts from the selected row (double-click a row's number to play from it). The song is saved with the kit; drums, Keys tracks, live recording and Capture all work in the row that's playing.
 - Follows your DAW's transport, or runs on its own
+
+**Look**
+- **Themes**: the **Theme** button (top right) switches the window's colours: **Purple Night** (the original), **MPC Classic**, **Midnight Blue**, **Forest**, **Daylight** (light) and **High Contrast**. **Custom colours...** lets you pick each colour (background, panels, text, accents and the pad colours) and shows the changes as you go. Your theme is remembered for every project; the TempoPAD's lights keep their own colours.
 
 **Browser**
 - Saved locations for your sample folders and music library ("Add a folder...")

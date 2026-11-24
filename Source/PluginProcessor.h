@@ -1,6 +1,8 @@
 #pragma once
 #include <juce_audio_utils/juce_audio_utils.h>
 #include "TimeStretch.h"
+#include "ExternalMidi.h"
+#include "Song.h"
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -312,6 +314,17 @@ public:
     std::atomic<double> hostBpm { 120.0 };
     void selectPattern (int p);
 
+    // ---- Song mode: a chain of patterns (rows of pattern x repeats), locked to the transport.
+    Song::Data song;
+    std::atomic<bool> songMode { false };        // on = the song plays instead of the current pattern
+    std::atomic<bool> songLoop { true };         // at the end: back to row 1, or (off) the sequencer stops
+    std::atomic<int> songRow { -1 };             // row playing (editor), -1 = none
+    std::atomic<int> songCursor { 0 };           // row the song starts from when Play is pressed here (editor sets it)
+    std::atomic<double> seqOrigin { 0.0 };       // beat where the playing row began (0 outside song mode)
+    Song::Snapshot songSnapshot() const;         // the song with every row's length, as it is now
+    double patternBeats (int p) const;           // one pass of pattern p's drums, in beats
+    double transportPpq() const { return lastPpqEnd.load(); }   // where the transport is (-1 = stopped)
+
     // ---- Keys tracks (settings shared by all patterns; the notes live in each pattern's lanes)
     struct KeysTrack
     {
@@ -321,6 +334,8 @@ public:
         std::atomic<float> glideMs { 0.0f };     // mono only: slide into the next note
         std::atomic<float> level { 1.0f };
         std::atomic<int> sliceCount { 0 };       // >0: slice mode - key root+i plays the pad i notes above sourcePad, unpitched
+        std::atomic<int> midiChannel { 0 };      // 1..16: also send the notes to the MIDI out device (0 = off)
+        std::atomic<bool> midiSound { false };   // with MIDI out on: still play the pad's sound here too
         juce::String name;                       // message thread
     };
     KeysTrack keysTracks[Keys::numTracks];
@@ -332,6 +347,13 @@ public:
     void resetKeysTracks();
     void drainKeyRecordings();                   // message thread: live-recorded notes -> lanes
     std::atomic<uint32_t> keysRecorded { 0 };    // bumped when recorded notes land (editor repaints)
+
+    // ---- MIDI out: Keys tracks with a channel set play a hardware synth (e.g. an M-Vave FM-1)
+    ExternalMidi extMidi;
+    std::atomic<bool> midiClockOut { false };    // also send MIDI clock + Start / Stop to the device
+    bool setMidiOutDevice (const juce::String& name);   // message thread; "" = none. false = couldn't open it
+    juce::String midiOutWanted;                  // message thread: the device the kit asked for (kept if it's missing)
+    void midiOutPanic() { midiPanicReq = true; } // note-offs for everything sounding on the device
 
     // ---- TempoPAD modes: the controller's own mode buttons switch what its pads do in FlipKit64.
     // Drum/Key (channel 1 notes) = play pads, User (channel 3 notes) = toggle steps for the selected
@@ -353,6 +375,13 @@ public:
     static constexpr int defaultStopCode = (1 << 16) | 127;    // Synido's default: Stop = CC 127
     std::atomic<int> transportMsg[numTransportButtons] { { defaultStopCode }, { 0 }, { 0 } };
     std::atomic<int> transportLearn { -1 };      // a button waiting to be taught: the next CC or note becomes it
+    // ---- MIDI learn for pads: teach any controller's pads to FlipKit64's 64 pads.
+    std::atomic<int> padLearn { -1 };            // pad waiting for its note: the next note-on becomes it
+    std::atomic<int> padLearned { 0 };           // bumped each time a pad is taught (the editor follows)
+    int getPadNote (int pad) const;              // note that plays this pad, or -1
+    void setPadNote (int pad, int note);         // note < 0 unmaps the pad; a note plays one pad only
+    void resetPadNotes();                        // back to the TempoPAD layout
+    bool padNotesAreDefault() const;
     std::atomic<int> lastMidiCode { 0 };         // the last CC / note received (shown while teaching)
     void transportAction (int button, bool hostIsPlaying);
 
@@ -435,6 +464,13 @@ private:
     std::atomic<bool> stopSoundsReq { false };
     bool wasRunning = false;
     void handleKeyHit (int track, int pitch, float velocity, juce::int64 gate);
+    bool keysMidi (int track, int pitch, float velocity, juce::int64 gate, int pos);   // false = don't play it here
+    std::atomic<bool> midiPanicReq { false };
+    bool clockWasRunning = false;
+    long long lastClockTick = -1;              // last MIDI clock sent (24 per beat), so none goes out twice
+    juce::String midiOutPendingOpen;             // set by kitFromXml (any thread), opened on the timer
+    juce::SpinLock midiOutPendingLock;
+    std::atomic<bool> midiOutPending { false };
     void releaseKey (int track, int pitch);
     int chooseLayer (int padIndex, const PadState& pad, float velocity);
     struct Voice;
@@ -444,13 +480,19 @@ private:
     std::vector<Keys::NotesPtr> noteRegistry;    // message thread: keeps every list alive until nothing uses it
 
     // Live-recorded keys (audio thread -> message thread)
-    struct KeyDown { int track = -1; double ppq = -1.0; float vel = 0.0f; int pattern = 0; };
+    struct KeyDown { int track = -1; double ppq = -1.0; float vel = 0.0f; int pattern = 0; double origin = 0.0; };
     KeyDown keyDown[128];
     struct KeyRec { int track, pattern, pitch; double on, off; float vel; };
     juce::AbstractFifo keyRecFifo { 256 };
     KeyRec keyRecBuf[256];
     void renderVoices (juce::AudioBuffer<float>& buffer, int start, int count);
     void scheduleSequencer (double ppq0, double ppqPerSample, int numSamples, Hit* hits, int& numHits, int maxHits);
+    // One pattern's drum steps from 'origin' (step 0) for at most maxK steps (-1 = forever), hits inside [ppq0, ppq1).
+    void schedulePatternSteps (const PatternData& pat, double origin, long long maxK, long long seed,
+                               double ppq0, double ppqPerSample, int numSamples, Hit* hits, int& numHits, int maxHits);
+    void scheduleLanes (const PatternData& pat, double origin, double until, double ppq0, double ppqPerSample, int numSamples,
+                        Hit* hits, int& numHits, int maxHits, bool showPlayhead);
+    void songBlock (double ppq0, double ppq1);   // song mode: which row plays now; stops at the end if not looping
 
     // 0..99, fixed for a given step occurrence (so a ratchet's repeats agree), different every loop.
     uint64_t rollSeed = (uint64_t) juce::Random::getSystemRandom().nextInt64();
@@ -462,7 +504,8 @@ private:
     }
 
     std::shared_ptr<const PadState> pads[PadLayout::numPads];
-    int noteToPad[128];
+    std::atomic<int> noteToPad[128];             // incoming note -> pad (-1 = none); MIDI learn edits this
+    int defaultNoteToPad[128];                   // the TempoPAD layout (its Easy-mode SysEx always uses this)
 
     // Roll (audio thread only): pads currently held down
     struct Held { bool on = false; float vel = 0.0f; double pressPpq = -1.0; double nextSample = 0.0; };
@@ -532,6 +575,7 @@ private:
     double internalPpq = 0.0;
     bool wasInternalPlaying = false;
     uint8_t skipOnce[PadLayout::numPads][Seq::maxSteps] {};
+    bool songActive = false;                     // this block plays the song (song mode on, rows in it, not ended)
 
     // editor -> audio requests (lock-free single-producer single-consumer)
     struct Request { int pad; float velocity; int track = -1; int pitch = 0; bool held = false; };

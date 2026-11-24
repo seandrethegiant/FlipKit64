@@ -15,12 +15,12 @@ mode, out = sys.argv[1], sys.argv[2]
 N, T, F = 343980, 336, 2048
 mix = helper.make_tensor_value_info("mix", TP.FLOAT, [1, 2, N])
 spec = helper.make_tensor_value_info("spec", TP.FLOAT, [1, T, 4, F])
-out_spec = helper.make_tensor_value_info("out_spec", TP.FLOAT, [1, T, 4, 4, F])
-out_wave = helper.make_tensor_value_info("out_wave", TP.FLOAT, [1, 4, 2, N])
+out_spec = helper.make_tensor_value_info("out_spec", TP.FLOAT, [1, T, 6, 4, F])
+out_wave = helper.make_tensor_value_info("out_wave", TP.FLOAT, [1, 6, 2, N])
 
 def i64(name, vals): return nh.from_array(np.array(vals, dtype=np.int64), name)
 def f32(name, v): return nh.from_array(np.array(v, dtype=np.float32), name)
-init = [i64("ax1", [1]), i64("ax2", [2]), i64("shape_wave", [1, 4, 2, N]), i64("shape_spec", [1, T, 4, 4, F]),
+init = [i64("ax1", [1]), i64("ax2", [2]), i64("shape_wave", [1, 6, 2, N]), i64("shape_spec", [1, T, 6, 4, F]),
         f32("quarter", 0.25), f32("zero", 0.0)]
 nodes = [
     helper.make_node("Unsqueeze", ["mix", "ax1"], ["mix4"]),

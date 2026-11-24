@@ -1,4 +1,5 @@
 #include "SamplerPage.h"
+#include <limits>
 
 using namespace juce;
 using namespace UI;
@@ -9,6 +10,7 @@ void WaveformView::setSample (SamplePtr s)
 {
     sample = std::move (s);
     markers.clear();
+    freeSlices.clear();
     selectedSlice = -1;
     playhead = -1.0;
     viewStart = 0.0;
@@ -19,11 +21,13 @@ void WaveformView::setSample (SamplePtr s)
     if (onViewChanged) onViewChanged();
 }
 
-void WaveformView::restore (SamplePtr s, std::vector<int> m)
+void WaveformView::restore (SamplePtr s, std::vector<int> m, std::vector<std::pair<int, int>> f, bool free)
 {
     if (s != sample) { setSample (std::move (s)); }
     markers = std::move (m);
     sortMarkers();
+    freeSlices = std::move (f);
+    freeMode = free;
     repaint();
     if (onMarkersChanged) onMarkersChanged();
 }
@@ -81,6 +85,11 @@ std::vector<std::pair<int, int>> WaveformView::slices() const
     std::vector<std::pair<int, int>> out;
     if (sample == nullptr) return out;
     const int len = sample->audio.getNumSamples();
+    if (freeMode)
+    {
+        for (auto& f : freeSlices) out.push_back ({ jlimit (0, len, f.first), jlimit (0, len, f.second) });
+        return out;
+    }
     int prev = 0;
     for (int m : markers) { if (m > prev && m < len) { out.push_back ({ prev, m }); prev = m; } }
     out.push_back ({ prev, len });
@@ -159,7 +168,8 @@ void WaveformView::paint (Graphics& g)
     {
         const float x0 = xForSample (sl[(size_t) i].first), x1 = xForSample (sl[(size_t) i].second);
         if (i == selectedSlice) { g.setColour (accent.withAlpha (0.18f)); g.fillRect (x0, 0.0f, x1 - x0, (float) getHeight()); }
-        else if (i % 2 == 1)    { g.setColour (Colours::white.withAlpha (0.025f)); g.fillRect (x0, 0.0f, x1 - x0, (float) getHeight()); }
+        else if (freeMode)      { g.setColour (text.withAlpha (0.035f)); g.fillRect (x0, 0.0f, x1 - x0, (float) getHeight()); }   // overlaps show up brighter
+        else if (i % 2 == 1)    { g.setColour (text.withAlpha (0.025f)); g.fillRect (x0, 0.0f, x1 - x0, (float) getHeight()); }
     }
 
     const float mid = getHeight() * 0.5f, scale = getHeight() * 0.46f;
@@ -179,7 +189,7 @@ void WaveformView::paint (Graphics& g)
             {
                 const float x = xForSample ((int) (gridOffset + k * beat));
                 const bool bar = k % 4 == 0;
-                g.setColour (Colours::white.withAlpha (bar ? 0.16f : 0.06f));
+                g.setColour (text.withAlpha (bar ? 0.16f : 0.06f));
                 g.drawVerticalLine ((int) x, 0.0f, (float) getHeight());
                 if (bar) { g.setColour (muted); g.drawText (String (k / 4 + 1), (int) x + 3, getHeight() - 15, 30, 13, Justification::centredLeft); }
             }
@@ -188,6 +198,8 @@ void WaveformView::paint (Graphics& g)
 
     // markers with slice numbers
     g.setFont (Font (11.0f, Font::bold));
+    if (freeMode) paintFreeSlices (g);
+    else
     for (int i = 0; i < (int) sl.size(); ++i)
     {
         const float x = xForSample (sl[(size_t) i].first);
@@ -201,7 +213,7 @@ void WaveformView::paint (Graphics& g)
     if (playhead >= 0.0)
     {
         const float x = xForSample ((int) playhead);
-        g.setColour (Colours::white);
+        g.setColour (text);
         g.drawLine (x, 0.0f, x, (float) getHeight(), 2.0f);
     }
 
@@ -215,9 +227,152 @@ void WaveformView::paint (Graphics& g)
     }
 }
 
+
+// ------------------------------------------------------------------ free slices
+
+static constexpr float laneTop = 3.0f, laneStep = 16.0f, laneBar = 14.0f;
+static constexpr int maxLanes = 6;
+
+std::vector<int> WaveformView::freeLanes (int& numLanes) const
+{
+    const int n = (int) freeSlices.size();
+    std::vector<int> order ((size_t) n), lane ((size_t) n, 0);
+    for (int i = 0; i < n; ++i) order[(size_t) i] = i;
+    std::stable_sort (order.begin(), order.end(), [this] (int a, int b) { return freeSlices[(size_t) a].first < freeSlices[(size_t) b].first; });
+    std::vector<int> laneEnd;
+    for (int i : order)
+    {
+        int l = 0;
+        while (l < (int) laneEnd.size() && laneEnd[(size_t) l] > freeSlices[(size_t) i].first) ++l;
+        if (l >= maxLanes) l = maxLanes - 1;                       // too many stacked: share the last row
+        if (l == (int) laneEnd.size()) laneEnd.push_back (0);
+        laneEnd[(size_t) l] = freeSlices[(size_t) i].second;
+        lane[(size_t) i] = l;
+    }
+    numLanes = jmax (1, (int) laneEnd.size());
+    return lane;
+}
+
+int WaveformView::freeHit (float x, float y, int& part) const
+{
+    part = 0;
+    if (! freeMode || sample == nullptr || freeSlices.empty()) return -1;
+    const int n = (int) freeSlices.size();
+    int nl = 1;
+    const auto lanes = freeLanes (nl);
+    auto classify = [&] (int i)
+    {
+        const float x0 = xForSample (freeSlices[(size_t) i].first), x1 = xForSample (freeSlices[(size_t) i].second);
+        const float tol = jmin (6.0f, (x1 - x0) / 3.0f);
+        part = std::abs (x - x0) <= tol ? 1 : std::abs (x - x1) <= tol ? 2 : 0;
+        return i;
+    };
+
+    if (y < laneTop + nl * laneStep)                                // the bar strip: the bar under the mouse
+        for (int i = n - 1; i >= 0; --i)
+        {
+            const float by = laneTop + lanes[(size_t) i] * laneStep;
+            if (y < by - 1.0f || y > by + laneBar + 1.0f) continue;
+            const float x0 = xForSample (freeSlices[(size_t) i].first), x1 = xForSample (freeSlices[(size_t) i].second);
+            if (x >= x0 - 4.0f && x <= x1 + 4.0f) return classify (i);
+        }
+
+    if (isPositiveAndBelow (selectedSlice, n))                      // the selected slice's edge lines run full height
+    {
+        const float x0 = xForSample (freeSlices[(size_t) selectedSlice].first), x1 = xForSample (freeSlices[(size_t) selectedSlice].second);
+        if (std::abs (x - x0) < 6.0f) { part = 1; return selectedSlice; }
+        if (std::abs (x - x1) < 6.0f) { part = 2; return selectedSlice; }
+    }
+
+    const int s = sampleForX (x);                                   // otherwise the slice under the mouse: the selected one, else the shortest
+    int best = -1, bestLen = std::numeric_limits<int>::max();
+    for (int i = 0; i < n; ++i)
+    {
+        const auto& f = freeSlices[(size_t) i];
+        if (s < f.first || s >= f.second) continue;
+        if (i == selectedSlice) { best = i; break; }
+        if (f.second - f.first < bestLen) { bestLen = f.second - f.first; best = i; }
+    }
+    part = 0;
+    return best;
+}
+
+void WaveformView::removeFreeSlice (int i)
+{
+    if (! isPositiveAndBelow (i, (int) freeSlices.size())) return;
+    if (onEditStart) onEditStart();
+    if (onSliceRemoved) onSliceRemoved (i);
+    freeSlices.erase (freeSlices.begin() + i);
+    if (selectedSlice == i) selectedSlice = -1;
+    else if (selectedSlice > i) --selectedSlice;
+    repaint();
+    if (onMarkersChanged) onMarkersChanged();
+}
+
+void WaveformView::paintFreeSlices (Graphics& g)
+{
+    const int n = (int) freeSlices.size();
+    if (n == 0)
+    {
+        const auto box = getLocalBounds().reduced (30, 10).withSizeKeepingCentre (jmin (getWidth() - 60, 560), 54);
+        g.setColour (panel.darker (0.3f).withAlpha (0.92f));            // so the text reads over the waveform
+        g.fillRoundedRectangle (box.toFloat(), 8.0f);
+        g.setColour (text);
+        g.setFont (Font (13.0f));
+        g.drawFittedText ("Free slices: drag on the waveform to make a slice. Drag its edges to resize, its middle to move it,\n"
+                          "right-click to delete. Shift-drag over a slice to make an overlapping one.", box.reduced (10, 4), Justification::centred, 3);
+        return;
+    }
+    int nl = 1;
+    const auto lanes = freeLanes (nl);
+    g.setFont (Font (11.0f, Font::bold));
+    for (int pass = 0; pass < 2; ++pass)                            // the selected slice last, so it sits on top
+        for (int i = 0; i < n; ++i)
+        {
+            const bool sel = i == selectedSlice;
+            if ((pass == 1) != sel) continue;
+            const float x0 = xForSample (freeSlices[(size_t) i].first), x1 = xForSample (freeSlices[(size_t) i].second);
+            if (x1 < -2.0f || x0 > (float) getWidth() + 2.0f) continue;
+            g.setColour (accent.withAlpha (sel ? 0.9f : 0.3f));
+            g.drawLine (x0, 0.0f, x0, (float) getHeight(), sel ? 1.5f : 1.0f);
+            g.drawLine (x1, 0.0f, x1, (float) getHeight(), sel ? 1.5f : 1.0f);
+            const float by = laneTop + lanes[(size_t) i] * laneStep, bw = jmax (3.0f, x1 - x0 - 1.0f);
+            g.setColour (accent.withAlpha (sel ? 0.95f : 0.5f));
+            g.fillRoundedRectangle (x0 + 0.5f, by, bw, laneBar, 3.0f);
+            if (bw >= 20.0f)
+            {
+                g.setColour (Colours::black);
+                g.drawText (String (i + 1), (int) x0 + 1, (int) by, (int) bw, (int) laneBar, Justification::centred);
+            }
+        }
+}
+
 void WaveformView::mouseDown (const MouseEvent& e)
 {
     if (sample == nullptr) return;
+    if (freeMode)
+    {
+        int part = 0;
+        int hit = freeHit ((float) e.x, (float) e.y, part);
+        if (e.mods.isPopupMenu()) { if (hit >= 0) removeFreeSlice (hit); return; }
+        if (e.mods.isShiftDown()) hit = -1;                     // Shift-drag always makes a new slice, even on top of others
+        dragKind = 0; dragMoved = false; downX = (float) e.x;
+        dragFrom = sampleForX ((float) e.x);
+        if (hit >= 0)
+        {
+            selectedSlice = dragSlice = hit;
+            dragOrigA = freeSlices[(size_t) hit].first; dragOrigB = freeSlices[(size_t) hit].second;
+            dragKind = part == 1 ? 3 : part == 2 ? 4 : 2;
+            repaint();
+            if (onSliceClicked) onSliceClicked (hit);
+        }
+        else
+        {
+            dragKind = 1; dragSlice = -1;
+            if (selectedSlice >= 0) { selectedSlice = -1; repaint(); if (onSliceClicked) onSliceClicked (-1); }
+        }
+        return;
+    }
     const int m = markerNear ((float) e.x);
     if (e.mods.isPopupMenu())
     {
@@ -245,6 +400,45 @@ void WaveformView::mouseDown (const MouseEvent& e)
 
 void WaveformView::mouseDrag (const MouseEvent& e)
 {
+    if (freeMode)
+    {
+        if (dragKind == 0 || sample == nullptr) return;
+        if (! dragMoved && std::abs ((float) e.x - downX) < 3.0f) return;
+        const int len = length();
+        const int pos = jlimit (0, len, sampleForX ((float) e.x));
+        if (! dragMoved)
+        {
+            dragMoved = true;
+            if (onEditStart) onEditStart();                             // one undo step per drag, and only once it really moves
+            if (dragKind == 1)
+            {
+                freeSlices.push_back ({ dragFrom, dragFrom });
+                dragSlice = selectedSlice = (int) freeSlices.size() - 1;
+            }
+        }
+        if (! isPositiveAndBelow (dragSlice, (int) freeSlices.size())) return;
+        auto snapped = [&] (int p) { return snap ? jlimit (0, len, snap (p)) : p; };
+        auto& f = freeSlices[(size_t) dragSlice];
+        if (dragKind == 1)
+        {
+            int a = snapped (jmin (dragFrom, pos)), b = snapped (jmax (dragFrom, pos));
+            if (b - a < minSliceSamples) { b = jmin (len, a + minSliceSamples); a = jmax (0, b - minSliceSamples); }
+            f = { a, b };
+        }
+        else if (dragKind == 2)
+        {
+            const int wlen = dragOrigB - dragOrigA;
+            int a = jlimit (0, jmax (0, len - wlen), dragOrigA + (sampleForX ((float) e.x) - dragFrom)), b = a + wlen;
+            const int sa = snapped (a), sb = snapped (b);
+            if (sb - sa >= minSliceSamples) { a = sa; b = sb; }
+            f = { a, b };
+        }
+        else if (dragKind == 3) f.first = jlimit (0, f.second - minSliceSamples, snapped (pos));
+        else                    f.second = jlimit (f.first + minSliceSamples, len, snapped (pos));
+        repaint();
+        if (onMarkersChanged) onMarkersChanged();
+        return;
+    }
     if (dragMarker < 0 || sample == nullptr) return;
     int pos = jlimit (1, sample->audio.getNumSamples() - 1, sampleForX ((float) e.x));
     if (snap) pos = snap (pos);
@@ -257,6 +451,21 @@ void WaveformView::mouseDrag (const MouseEvent& e)
 
 void WaveformView::mouseDoubleClick (const MouseEvent& e)
 {
+    if (freeMode)
+    {
+        int part = 0;
+        if (sample == nullptr || freeHit ((float) e.x, (float) e.y, part) >= 0) return;
+        const int len = length();
+        const int a = snap ? jlimit (0, len, snap (sampleForX ((float) e.x))) : sampleForX ((float) e.x);
+        const int b = jmin (len, a + (int) (0.25 * sample->sampleRate));      // a quarter second to start with; drag the edges from there
+        if (b - a < minSliceSamples) return;
+        if (onEditStart) onEditStart();
+        freeSlices.push_back ({ a, b });
+        selectedSlice = (int) freeSlices.size() - 1;
+        repaint();
+        if (onMarkersChanged) onMarkersChanged();
+        return;
+    }
     if (sample == nullptr || markerNear ((float) e.x) >= 0) return;
     if (onEditStart) onEditStart();
     int pos = jmax (1, sampleForX ((float) e.x));
@@ -559,19 +768,20 @@ SamplerPage::SamplerPage (EditorContext& c) : ctx (c), proc (c.getProc())
 
     // ---- chop row
     chopLabel.setText ("Chop", dontSendNotification); styleLabel (chopLabel, 11.0f); addAndMakeVisible (chopLabel);
-    for (int i = 0; i < 4; ++i)
+    for (int i = 0; i < 5; ++i)
     {
         auto& b = modeButtons[i];
         styleButton (b);
         b.setClickingTogglesState (true);
         b.setRadioGroupId (701);
-        b.onClick = [this, i] { if (modeButtons[i].getToggleState()) { chopModeId = i + 1; updateChopControls(); } };
+        b.onClick = [this, i] { if (modeButtons[i].getToggleState()) setChopMode (i + 1); };
         addAndMakeVisible (b);
     }
     modeButtons[0].setTooltip ("Cut where each hit starts");
     modeButtons[1].setTooltip ("Cut into equal pieces");
     modeButtons[2].setTooltip ("Cut on the beat: bars, beats, 8ths or 16ths at the loop's tempo");
     modeButtons[3].setTooltip ("Place markers yourself: double-click the waveform");
+    modeButtons[4].setTooltip ("Free slices: drag on the waveform to make a slice, drag its edges or middle to change it. Shift-drag over a slice to overlap it.");
     modeButtons[0].setToggleState (true, dontSendNotification);
     styleLabel (chopAmountLabel, 11.0f); addAndMakeVisible (chopAmountLabel);
     styleSlider (chopAmount, 44);
@@ -586,7 +796,7 @@ SamplerPage::SamplerPage (EditorContext& c) : ctx (c), proc (c.getProc())
     bpmEdit.onTextChange = [this]
     {
         const double v = bpmEdit.getText().getDoubleValue();
-        if (v >= 40.0 && v <= 250.0) { pushUndo(); setBpm (v); }
+        if (v >= 40.0 && v <= 250.0) { pushUndo(); bpmTyped = true; setBpm (v); }
         else setBpm (bpm);
     };
     addAndMakeVisible (bpmEdit);
@@ -607,7 +817,7 @@ SamplerPage::SamplerPage (EditorContext& c) : ctx (c), proc (c.getProc())
     stopSoundsButton.onClick = [this] { ctx.stopAllRequested(); };
    #if FLIPKIT_STEMS
     styleButton (splitStemsButton); addAndMakeVisible (splitStemsButton);
-    splitStemsButton.setTooltip ("Separate this sample into drums, bass, other and vocals (runs on your computer, can take a few minutes)");
+    splitStemsButton.setTooltip ("Separate this sample into drums, bass, vocals, guitar, piano and other (runs on your computer, can take a few minutes)");
     splitStemsButton.onClick = [this]
     {
         auto s = wave.getSample();
@@ -617,7 +827,12 @@ SamplerPage::SamplerPage (EditorContext& c) : ctx (c), proc (c.getProc())
    #endif
     chopButton.setColour (TextButton::buttonColourId, accent.darker (0.35f));
     chopButton.onClick = [this] { doChop(); };
-    clearMarkersButton.onClick = [this] { pushUndo(); wave.markers.clear(); wave.selectedSlice = -1; wave.repaint(); markersChanged(); };
+    clearMarkersButton.onClick = [this]
+    {
+        pushUndo();
+        if (wave.freeMode) wave.freeSlices.clear(); else wave.markers.clear();
+        wave.selectedSlice = -1; wave.repaint(); markersChanged();
+    };
     styleLabel (tuneText, 12.0f, text);
     tuneText.setJustificationType (Justification::centred);
     tuneText.setTooltip ("Tune the slices (applied to the pads they go to)");
@@ -632,6 +847,11 @@ SamplerPage::SamplerPage (EditorContext& c) : ctx (c), proc (c.getProc())
     // ---- waveform
     wave.onMarkersChanged = [this] { markersChanged(); };
     wave.onEditStart = [this] { pushUndo(); };
+    wave.onSliceRemoved = [this] (int i)             // a free slice is about to go: its settings go with it
+    {
+        if (isPositiveAndBelow (i, (int) sliceSet.size())) sliceSet.erase (sliceSet.begin() + i);
+        assigned.clear();                            // the numbers after it shift down, so pads stop following
+    };
     wave.onSliceClicked = [this] (int i) { selectSlice (i, true); };
     wave.onFileDropped = [this] (const File& f) { loadFile (f); };
     wave.snap = [this] (int pos) { auto s = wave.getSample(); return s != nullptr && snapToggle.getToggleState() ? nearestZeroCrossing (*s, pos) : pos; };
@@ -756,7 +976,7 @@ SamplerPage::SamplerPage (EditorContext& c) : ctx (c), proc (c.getProc())
 
 SamplerPage::Snap SamplerPage::snapNow() const
 {
-    return { wave.getSample(), wave.markers, sliceSet, bpm, tuneSemis, wave.selectedSlice };
+    return { wave.getSample(), wave.markers, sliceSet, bpm, tuneSemis, wave.selectedSlice, wave.freeSlices, wave.freeMode };
 }
 
 void SamplerPage::pushUndo()
@@ -769,10 +989,16 @@ void SamplerPage::pushUndo()
 
 void SamplerPage::applySnap (const Snap& s)
 {
-    const bool sameCount = s.markers.size() == wave.markers.size() && s.sample == wave.getSample();
+    const bool sameCount = s.sample == wave.getSample() && s.freeMode == wave.freeMode
+                           && (s.freeMode ? s.freeSl.size() == wave.freeSlices.size() : s.markers.size() == wave.markers.size());
     sliceSet = s.sets;
     tuneSemis = s.tune;
-    wave.restore (s.sample, s.markers);         // calls markersChanged()
+    if (s.freeMode != (chopModeId == 5))        // undo across a switch to / from Free slices
+    {
+        chopModeId = s.freeMode ? 5 : (chopModeId == 5 ? 4 : chopModeId);
+        updateChopControls();
+    }
+    wave.restore (s.sample, s.markers, s.freeSl, s.freeMode);         // calls markersChanged()
     sliceSet = s.sets;                          // restore exactly, whatever markersChanged guessed
     sliceStarts.clear();
     for (auto& sl : wave.slices()) sliceStarts.push_back (sl.first);
@@ -815,13 +1041,19 @@ void SamplerPage::markersChanged()
 {
     auto sl = wave.getSample() != nullptr ? wave.slices() : std::vector<std::pair<int, int>>();
     std::vector<SliceSet> next (sl.size());
-    if (sl.size() == sliceSet.size())
+    if (wave.freeMode)
+    {
+        // free slices keep their number for life: new ones are added at the end, deleted ones are handled by onSliceRemoved
+        for (size_t j = 0; j < next.size() && j < sliceSet.size(); ++j) next[j] = sliceSet[j];
+        if (sl.size() < sliceSet.size()) assigned.clear();
+    }
+    else if (sl.size() == sliceSet.size())
         next = sliceSet;                                     // a marker moved: settings stay with their slice
     else
         for (size_t j = 0; j < sl.size(); ++j)
             for (size_t k = 0; k < sliceStarts.size() && k < sliceSet.size(); ++k)
                 if (sliceStarts[k] == sl[j].first) { next[j] = sliceSet[k]; break; }
-    if (sl.size() != sliceSet.size()) assigned.clear();
+    if (! wave.freeMode && sl.size() != sliceSet.size()) assigned.clear();
     sliceSet = std::move (next);
     sliceStarts.clear();
     for (auto& s : sl) sliceStarts.push_back (s.first);
@@ -830,6 +1062,46 @@ void SamplerPage::markersChanged()
     updateSliceInfo();
     updateSlicePanel();
     repaint (padsArea);
+}
+
+void SamplerPage::setChopMode (int id)
+{
+    id = jlimit (1, 5, id);
+    const bool toFree = id == 5, wasFree = chopModeId == 5;
+    if (toFree != wasFree) switchSliceSet (toFree);
+    chopModeId = id;
+    updateChopControls();
+}
+
+// Switching between the marker modes and Free slices. Each keeps its own slices. The first time you go to
+// Free, it starts from the slices you already have, so nothing is lost.
+void SamplerPage::switchSliceSet (bool toFree)
+{
+    if (wave.getSample() != nullptr) pushUndo();
+    bool carryOver = false;
+    if (toFree)
+    {
+        stashedMarkerSets = sliceSet;
+        if (wave.freeSlices.empty() && ! wave.markers.empty())
+        {
+            wave.freeMode = false;
+            wave.freeSlices = wave.slices();
+            carryOver = true;
+        }
+    }
+    else stashedFreeSets = sliceSet;
+    wave.freeMode = toFree;
+    if (! carryOver)
+    {
+        const auto& back = toFree ? stashedFreeSets : stashedMarkerSets;
+        const size_t count = wave.getSample() != nullptr ? wave.slices().size() : 0;
+        sliceSet = back.size() == count ? back : std::vector<SliceSet>();
+        sliceStarts.clear();
+        assigned.clear();
+        wave.selectedSlice = -1;
+    }
+    wave.repaint();
+    markersChanged();
 }
 
 void SamplerPage::selectSlice (int i, bool hear)
@@ -891,6 +1163,22 @@ void SamplerPage::nudge (bool startEdge, int dir)
     auto s = wave.getSample();
     const int i = wave.selectedSlice;
     if (s == nullptr || i < 0) return;
+    if (wave.freeMode)                                        // free slices: each edge moves on its own, no neighbours in the way
+    {
+        if (! isPositiveAndBelow (i, (int) wave.freeSlices.size())) return;
+        pushUndo();
+        const int step = (int) (0.01 * s->sampleRate), len = s->audio.getNumSamples();
+        auto& f = wave.freeSlices[(size_t) i];
+        int& edge = startEdge ? f.first : f.second;
+        const int lo = startEdge ? 0 : f.first + WaveformView::minSliceSamples, hi = startEdge ? f.second - WaveformView::minSliceSamples : len;
+        int pos = jlimit (lo, hi, edge + dir * step);
+        if (snapToggle.getToggleState()) pos = jlimit (lo, hi, nearestZeroCrossing (*s, pos));
+        edge = pos;
+        wave.repaint();
+        markersChanged();
+        if (! loopToggle.getToggleState()) auditionSlice (i);
+        return;
+    }
     const int m = startEdge ? i - 1 : i;                      // marker index: slice i starts at markers[i-1], ends at markers[i]
     if (! isPositiveAndBelow (m, (int) wave.markers.size())) return;
     pushUndo();
@@ -924,12 +1212,16 @@ void SamplerPage::setBpm (double b)
 void SamplerPage::updateChopControls()
 {
     const int mode = chopModeId;
-    for (int i = 0; i < 4; ++i) modeButtons[i].setToggleState (i + 1 == mode, dontSendNotification);
+    for (int i = 0; i < 5; ++i) modeButtons[i].setToggleState (i + 1 == mode, dontSendNotification);
+    hint.setText (mode == 5 ? "Free slices: drag on the waveform to make a slice (Shift-drag on top of another one to overlap), drag its edges to resize it, "
+                              "its middle to move it, right-click deletes it, double-click makes a quick one. Click a slice to hear it. Wheel zooms, Shift+wheel scrolls. Click a pad above to start the slices there."
+                            : "Click the waveform to hear a slice; double-click adds a marker, drag moves it, right-click deletes it. "
+                              "Wheel zooms, Shift+wheel scrolls. Click a pad above to start the slices there.", dontSendNotification);
     chopAmount.setVisible (mode == 1 || mode == 2);
     chopAmountLabel.setVisible (mode == 1 || mode == 2);
     for (auto* c : std::initializer_list<Component*> { &bpmLabel, &bpmEdit }) c->setVisible (mode == 3);
     for (auto& b : gridButtons) b.setVisible (mode == 3);
-    chopButton.setVisible (mode != 4);
+    chopButton.setVisible (mode < 4);
     if (mode == 1)
     {
         chopAmountLabel.setText ("Sensitivity", dontSendNotification);
@@ -954,6 +1246,7 @@ void SamplerPage::loadFile (const File& f)
     if (s == nullptr) { fileLabel.setText ("Couldn't load " + f.getFileName(), dontSendNotification); return; }
     if (wave.getSample() != nullptr) pushUndo();
     sliceSet.clear(); sliceStarts.clear(); assigned.clear();
+    stashedMarkerSets.clear(); stashedFreeSets.clear();
     tuneSemis = 0;
     wave.setSample (s);
     // where the first sound starts (the beat grid lines up there)
@@ -967,6 +1260,7 @@ void SamplerPage::loadFile (const File& f)
     }
     double b = bpmFromName (f.getFileNameWithoutExtension());
     bpmFromFile = b > 0.0;
+    bpmTyped = false;
     if (b <= 0.0) b = detectBpm (*s);
     setBpm (b);
     updateSliceInfo();
@@ -978,9 +1272,16 @@ void SamplerPage::replaceSample (SamplePtr s, int shift)
     if (s == nullptr) return;
     std::vector<int> m;
     for (int x : wave.markers) { const int p = x - shift; if (p > 64 && p < s->audio.getNumSamples() - 64) m.push_back (p); }
+    std::vector<std::pair<int, int>> fs;
+    for (auto& f : wave.freeSlices)
+    {
+        const int a = jmax (0, f.first - shift), b = jmin (s->audio.getNumSamples(), f.second - shift);
+        if (b - a >= WaveformView::minSliceSamples) fs.push_back ({ a, b });
+    }
+    if (fs.size() != wave.freeSlices.size()) { sliceSet.clear(); sliceStarts.clear(); }    // some free slices fell off the ends
     // pads given slices of the old sample keep it; reassign to move them over
     assigned.clear();
-    wave.restore (s, m);
+    wave.restore (s, m, fs, wave.freeMode);
     wave.gridOffset = jmax (0.0, wave.gridOffset - shift);
     updateSliceInfo();
 }
@@ -1018,7 +1319,7 @@ void SamplerPage::trimSample()
 void SamplerPage::doChop()
 {
     auto s = wave.getSample();
-    if (s == nullptr) return;
+    if (s == nullptr || chopModeId >= 4) return;
     if (chopModeId == 3 && bpm <= 0.0) { sliceInfo.setText ("Type the loop's BPM first", dontSendNotification); return; }
     pushUndo();
     std::vector<int> m;
@@ -1110,13 +1411,13 @@ void SamplerPage::updateSliceInfo()
     {
         const double secs = s->audio.getNumSamples() / s->sampleRate;
         String info = s->file.getFileName() + "     " + String (secs, 1) + " s";
-        if (bpm > 0.0) info << "  ·  " << String (bpm, 1) << " BPM" << (bpmFromFile ? " (from the name)" : " (detected)")
+        if (bpm > 0.0) info << "  ·  " << String (bpm, 1) << " BPM" << (bpmTyped ? " (typed)" : bpmFromFile ? " (from the name)" : " (detected)")
                             << "  ·  " << String (secs * bpm / 60.0, 1) << " beats";
         fileLabel.setText (info, dontSendNotification);
     }
     const int n = s != nullptr ? (int) wave.slices().size() : 0;
     const auto pads = targetPads();
-    sliceInfo.setText (n == 0 ? String ("No sample") :
+    sliceInfo.setText (n == 0 ? (s == nullptr ? String ("No sample") : String ("No slices yet - drag on the waveform to make one")) :
                        String (n) + (n == 1 ? " slice" : " slices") + " - they go to pads from note "
                        + String (pads.empty() ? 0 : PadLayout::noteForPad (pads.front())), dontSendNotification);
 }
@@ -1145,8 +1446,8 @@ void SamplerPage::updateSlicePanel()
     selTitle.setText (title, dontSendNotification);
     startText.setText (secs (sl[(size_t) i].first), dontSendNotification);
     endText.setText (secs (sl[(size_t) i].second), dontSendNotification);
-    startLeft.setEnabled (i > 0); startRight.setEnabled (i > 0);
-    endLeft.setEnabled (i < (int) sl.size() - 1); endRight.setEnabled (i < (int) sl.size() - 1);
+    startLeft.setEnabled (wave.freeMode || i > 0); startRight.setEnabled (wave.freeMode || i > 0);
+    endLeft.setEnabled (wave.freeMode || i < (int) sl.size() - 1); endRight.setEnabled (wave.freeMode || i < (int) sl.size() - 1);
     const auto& x = sliceSet[(size_t) i];
     gainSlider.setValue (x.gainDb, dontSendNotification);
     fadeInSlider.setValue (x.fadeInMs, dontSendNotification);
@@ -1187,6 +1488,7 @@ void SamplerPage::startStopTap()
     if (proc.tapPlaying.load()) { proc.stopTap(); return; }      // tick() finishes up
     auto s = wave.getSample();
     if (s == nullptr) { tapInfo.setText ("Load a sample first", dontSendNotification); return; }
+    if (wave.freeMode) { tapInfo.setText ("Tap chop uses the marker modes - pick another chop mode first", dontSendNotification); return; }
     double start = wave.viewStart;
     auto sl = wave.slices();
     if (isPositiveAndBelow (wave.selectedSlice, (int) sl.size())) start = sl[(size_t) wave.selectedSlice].first;
@@ -1416,7 +1718,12 @@ void SamplerPage::resized()
     {
         auto r = t.removeFromTop (28);
         chopLabel.setBounds (r.removeFromLeft (36));
-        for (auto& b : modeButtons) { b.setBounds (r.removeFromLeft (b.getButtonText() == "Equal" ? 56 : 80).reduced (0, 1)); r.removeFromLeft (3); }
+        for (auto& b : modeButtons)       // five buttons in the room the four used to take, so Chop and Clear keep theirs
+        {
+            const auto t = b.getButtonText();
+            b.setBounds (r.removeFromLeft (t == "Transients" ? 72 : t == "Equal" ? 50 : t == "Beat grid" ? 66 : t == "Manual" ? 58 : 46).reduced (0, 1));
+            r.removeFromLeft (3);
+        }
         r.removeFromLeft (10);
         trimButton.setBounds (r.removeFromRight (90).reduced (0, 1)); r.removeFromRight (4);
         normalizeButton.setBounds (r.removeFromRight (80).reduced (0, 1)); r.removeFromRight (8);

@@ -59,7 +59,7 @@ PreviewStrip::PreviewStrip (EditorContext& c) : ctx (c), proc (c.getProc())
 
    #if FLIPKIT_STEMS
     styleButton (stemsButton); addAndMakeVisible (stemsButton);
-    stemsButton.setTooltip ("Separate this sample into drums, bass, other and vocals (runs on your computer, can take a few minutes)");
+    stemsButton.setTooltip ("Separate this sample into drums, bass, vocals, guitar, piano and other (runs on your computer, can take a few minutes)");
     stemsButton.onClick = [this]
     {
         if (shown == nullptr) return;

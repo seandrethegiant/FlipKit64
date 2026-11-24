@@ -5,6 +5,9 @@
 // Waveform with slice markers. Click = select and hear the slice under the mouse,
 // double-click = add a marker, drag a marker = move it, right-click a marker = delete it,
 // mouse wheel = zoom (Shift + wheel = scroll).
+// Free slices (0.9.11, like the MPC's non-contiguous chop): every slice has its own start and end, and
+// overlaps and gaps are fine. Drag empty waveform = make a slice (Shift-drag = make one even on top of
+// another), drag its edges = resize, drag its middle = move it, right-click = delete it. Slices keep the order they were made in (that is their number).
 class WaveformView : public juce::Component,
                      public juce::FileDragAndDropTarget,
                      public juce::DragAndDropTarget
@@ -12,7 +15,7 @@ class WaveformView : public juce::Component,
 public:
     explicit WaveformView (EditorContext& c) : ctx (c) {}
     void setSample (SamplePtr s);
-    void restore (SamplePtr s, std::vector<int> m);    // undo: keeps the view if the sample is the same
+    void restore (SamplePtr s, std::vector<int> m, std::vector<std::pair<int, int>> f = {}, bool free = false);   // undo: keeps the view if the sample is the same
     SamplePtr getSample() const { return sample; }
     std::vector<int> markers;               // slice starts in samples (0 is implicit)
     int selectedSlice = -1;
@@ -23,6 +26,12 @@ public:
     std::function<void (const juce::File&)> onFileDropped;
 
     std::vector<std::pair<int, int>> slices() const;   // [start, end) in samples
+
+    // free slices: used instead of the markers while freeMode is on
+    bool freeMode = false;
+    std::vector<std::pair<int, int>> freeSlices;        // [start, end) each, in the order they were made
+    std::function<void (int)> onSliceRemoved;           // just before free slice i is deleted
+    static constexpr int minSliceSamples = 64;
 
     // beat grid overlay (bpm <= 0 = none)
     double bpm = 0.0, gridOffset = 0.0;
@@ -42,7 +51,7 @@ public:
     void resized() override { peaksDirty = true; }
     void mouseDown (const juce::MouseEvent&) override;
     void mouseDrag (const juce::MouseEvent&) override;
-    void mouseUp (const juce::MouseEvent&) override { dragMarker = -1; }
+    void mouseUp (const juce::MouseEvent&) override { dragMarker = -1; dragKind = 0; }
     void mouseDoubleClick (const juce::MouseEvent&) override;
     void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
@@ -57,6 +66,14 @@ private:
     std::vector<float> peakMin, peakMax;
     bool peaksDirty = true;
     int dragMarker = -1;
+    // free-slice drag: 1 making a slice, 2 moving it, 3 start edge, 4 end edge
+    int dragKind = 0, dragSlice = -1, dragFrom = 0, dragOrigA = 0, dragOrigB = 0;
+    bool dragMoved = false;
+    float downX = 0.0f;
+    std::vector<int> freeLanes (int& numLanes) const;           // which row of the bar strip each free slice sits in
+    int freeHit (float x, float y, int& part) const;            // slice under the mouse; part 0 body, 1 start edge, 2 end edge
+    void removeFreeSlice (int i);
+    void paintFreeSlices (juce::Graphics&);
     void buildPeaks();
     float xForSample (int s) const;
     int sampleForX (float x) const;
@@ -100,11 +117,11 @@ public:
     std::vector<int> sliceStarts;           // where each SliceSet's slice started (to follow marker edits)
     std::vector<int> assigned;              // slice i -> the pad it was last assigned to (edits follow live)
     double bpm = 0.0;
-    bool bpmFromFile = false;
+    bool bpmFromFile = false, bpmTyped = false;
     int tuneSemis = 0;
-    int chopModeId = 1;                     // 1 transients, 2 equal, 3 beat grid, 4 manual
+    int chopModeId = 1;                     // 1 transients, 2 equal, 3 beat grid, 4 manual, 5 free slices
     double gridBeats = 1.0;                 // beat grid: beats per slice
-    void setChopMode (int id) { chopModeId = juce::jlimit (1, 4, id); updateChopControls(); }
+    void setChopMode (int id);
     void undo();
     void redo();
     juce::String status() const { return sliceInfo.getText(); }
@@ -124,7 +141,10 @@ private:
     juce::TextButton splitStemsButton { "Split stems..." };
    #endif
     std::unique_ptr<juce::FileChooser> chooser;
-    struct Snap { SamplePtr sample; std::vector<int> markers; std::vector<SliceSet> sets; double bpm; int tune; int sel; };
+    struct Snap { SamplePtr sample; std::vector<int> markers; std::vector<SliceSet> sets; double bpm; int tune; int sel;
+                  std::vector<std::pair<int, int>> freeSl; bool freeMode; };
+    std::vector<SliceSet> stashedMarkerSets, stashedFreeSets;    // each mode's slice settings while the other is showing
+    void switchSliceSet (bool toFree);
     std::vector<Snap> undoStack, redoStack;
     Snap snapNow() const;
     void pushUndo();
@@ -139,7 +159,7 @@ private:
 
     // chop row
     juce::Label chopLabel, chopAmountLabel, bpmLabel, bpmEdit, tuneText;
-    juce::TextButton modeButtons[4] { juce::TextButton ("Transients"), juce::TextButton ("Equal"), juce::TextButton ("Beat grid"), juce::TextButton ("Manual") };
+    juce::TextButton modeButtons[5] { juce::TextButton ("Transients"), juce::TextButton ("Equal"), juce::TextButton ("Beat grid"), juce::TextButton ("Manual"), juce::TextButton ("Free") };
     juce::TextButton gridButtons[4] { juce::TextButton ("1 bar"), juce::TextButton ("1/4"), juce::TextButton ("1/8"), juce::TextButton ("1/16") };
     juce::Slider chopAmount;
     juce::TextButton chopButton { "Chop" }, clearMarkersButton { "Clear" };

@@ -1,24 +1,10 @@
 #pragma once
 #include "PluginProcessor.h"
+#include "Theme.h"
 
 namespace UI
 {
-    // Purple / orange / white theme
-    const juce::Colour bg      { 0xff150f22 };   // deep purple-black
-    const juce::Colour panel   { 0xff211836 };
-    const juce::Colour line    { 0xff3a2c58 };
-    const juce::Colour text    { 0xfff6f3fb };   // near white
-    const juce::Colour muted   { 0xff9d92b8 };
-    const juce::Colour left    { 0xffff7a1f };   // left half of the pad grid (notes 36-67): orange
-    const juce::Colour right   { 0xffa45cff };   // right half (notes 68-99): purple
-    const juce::Colour accent  { 0xffff8c2e };   // orange
-    const juce::Colour rec     { 0xffff3d5a };
-
-    // Pad zones, matching the controller's default drum-mode colours (4x4 quadrants).
-    const juce::Colour zonePurple { 0xffc84dff };   // notes 52-67 (top left)
-    const juce::Colour zoneBlue   { 0xff7389fb };   // notes 84-99 (top right)
-    const juce::Colour zoneCyan   { 0xff1ad9fc };   // notes 36-51 (bottom left)
-    const juce::Colour zoneYellow { 0xfffee150 };   // notes 68-83 (bottom right)
+    // The palette (bg, panel, accent, zone colours...) lives in Theme.h and follows the chosen theme.
 
     inline juce::Colour padHue (int pad)
     {
@@ -70,6 +56,8 @@ struct EditorContext
     virtual void easyLayoutChanged (int) {}
     virtual void transportButtonsChanged() {}
     virtual void velocityModeChanged (int) {}
+    virtual void learnPadNotes (int /*firstPad*/, bool /*inOrder*/) {}   // MIDI learn: teach pad notes from any controller
+    virtual void padNotesChanged() {}                 // pad notes changed (reset or taught): save them
     virtual void midiLogChanged (bool) {}             // troubleshooting log on/off
     virtual juce::File midiLogFile() const { return {}; }       // a TempoPAD button was taught: save it
     static constexpr const char* dragId = "PadRomplerFiles";

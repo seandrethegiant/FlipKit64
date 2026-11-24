@@ -129,9 +129,16 @@ public:
     void transportButtonsChanged() override;
     void velocityModeChanged (int mode) override;
     void midiLogChanged (bool on) override;
+    void learnPadNotes (int firstPad, bool inOrder) override;
+    void padNotesChanged() override;
     juce::File midiLogFile() const override { return logFile; }
     void drainMidiLog();
     juce::File logFile;
+    std::unique_ptr<juce::AlertWindow> padLearnWindow;   // MIDI learn for pads
+    int learnPad = -1, learnSeen = 0;
+    bool learnInOrder = false;
+    void padLearnTick();
+    void padLearnMessage();
     std::unique_ptr<juce::FileOutputStream> logStream;
 
     void showTab (int tab);
@@ -199,6 +206,16 @@ private:
 
     // top bar
     juce::TextButton saveKitButton { "Save kit..." }, loadKitButton { "Load kit..." };
+    juce::TextButton themeButton { "Theme" };
+    void showThemeMenu();
+    void openCustomTheme();
+
+public:
+    // Switch the colour theme (live) and remember it for next time. Public for the tests.
+    void setTheme (const UI::Theme&, bool save = true);
+private:
+    void applyLookAndFeelColours();        // the shared LookAndFeel's colours, from the palette
+
     juce::HyperlinkButton supportLink { "Support FlipKit64", juce::URL ("https://ko-fi.com/seandrethegiant") };
     juce::Slider masterSlider;
     juce::Label masterLabel;

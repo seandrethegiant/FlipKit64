@@ -3,3 +3,4 @@ out*/
 fk-*/
 *.user
 .vs/
+__pycache__/

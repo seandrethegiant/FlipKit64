@@ -34,7 +34,7 @@ void PadButton::paint (Graphics& g)
 
     if (selected || dragOver)
     {
-        g.setColour (Colours::white);
+        g.setColour (text);   // white on dark themes, dark on Daylight
         g.drawRoundedRectangle (r, 6.0f, 2.5f);
     }
     else
@@ -43,9 +43,9 @@ void PadButton::paint (Graphics& g)
         g.drawRoundedRectangle (r, 6.0f, 1.0f);
     }
 
-    const Colour ink = loaded ? Colour (0xff120c1c) : muted;   // dark text on lit pads
+    const Colour padInk = loaded ? ink : muted;   // dark text on lit pads
     auto inner = r.reduced (6.0f, 4.0f);
-    g.setColour (loaded ? ink.withAlpha (0.6f) : muted);
+    g.setColour (loaded ? padInk.withAlpha (0.6f) : muted);
     g.setFont (Font (10.0f));
     g.drawText (String (note), inner.removeFromTop (12.0f), Justification::topLeft);
 
@@ -75,6 +75,28 @@ void PadButton::decay()
 void PadButton::mouseDown (const MouseEvent& e)
 {
     ctx.selectPad (index);
+    if (e.mods.isPopupMenu())                          // right-click: MIDI learn for this pad
+    {
+        auto& proc = ctx.getProc();
+        const int n = proc.getPadNote (index);
+        PopupMenu m;
+        m.addSectionHeader ("MIDI learn (use any pad controller)");
+        m.addItem (1, "Learn this pad..." + String (n >= 0 ? "  (now note " + String (n) + ")" : "  (no note)"));
+        m.addItem (2, "Learn this pad and the ones after it, in order...");
+        m.addItem (3, "Forget this pad's note", n >= 0);
+        m.addSeparator();
+        m.addItem (4, "Back to the TempoPAD layout", ! proc.padNotesAreDefault());
+        m.showMenuAsync (PopupMenu::Options(), [this, safe = Component::SafePointer<PadButton> (this)] (int r)
+        {
+            if (safe == nullptr) return;
+            auto& p = ctx.getProc();
+            if (r == 1) ctx.learnPadNotes (index, false);
+            else if (r == 2) ctx.learnPadNotes (index, true);
+            else if (r == 3) { p.setPadNote (index, -1); ctx.padNotesChanged(); }
+            else if (r == 4) { p.resetPadNotes(); ctx.padNotesChanged(); }
+        });
+        return;
+    }
     // click lower on the pad = softer hit, so velocity layers can be auditioned
     const float vel = jlimit (0.05f, 1.0f, 1.0f - (float) e.y / (float) jmax (1, getHeight()) * 0.95f);
     ctx.getProc().triggerPad (index, vel, true);       // a Hold pad plays until the mouse is let go
@@ -437,32 +459,7 @@ PadRomplerEditor::PadRomplerEditor (PadRomplerProcessor& p)
     : AudioProcessorEditor (p), proc (p)
 {
     setOpaque (true);
-    getLookAndFeel().setColour (ResizableWindow::backgroundColourId, bg);
-    getLookAndFeel().setColour (ComboBox::backgroundColourId, panel.brighter (0.06f));
-    getLookAndFeel().setColour (ComboBox::textColourId, text);
-    getLookAndFeel().setColour (ComboBox::outlineColourId, line);
-    getLookAndFeel().setColour (PopupMenu::backgroundColourId, panel.brighter (0.04f));
-    getLookAndFeel().setColour (PopupMenu::textColourId, text);
-    getLookAndFeel().setColour (PopupMenu::highlightedBackgroundColourId, accent.withAlpha (0.4f));
-    getLookAndFeel().setColour (ComboBox::arrowColourId, text);
-    getLookAndFeel().setColour (TextButton::buttonColourId, panel.brighter (0.08f));
-    getLookAndFeel().setColour (DirectoryContentsDisplayComponent::highlightColourId, right.withAlpha (0.35f));
-    getLookAndFeel().setColour (ToggleButton::textColourId, text);
-    getLookAndFeel().setColour (ToggleButton::tickColourId, accent);
-    getLookAndFeel().setColour (ToggleButton::tickDisabledColourId, muted);
-    getLookAndFeel().setColour (ScrollBar::thumbColourId, right.withAlpha (0.6f));
-    getLookAndFeel().setColour (Slider::backgroundColourId, line);
-    getLookAndFeel().setColour (Slider::trackColourId, right);
-    getLookAndFeel().setColour (Slider::thumbColourId, accent);
-    getLookAndFeel().setColour (TextEditor::backgroundColourId, panel.brighter (0.06f));
-    getLookAndFeel().setColour (TextEditor::outlineColourId, line);
-    getLookAndFeel().setColour (ListBox::backgroundColourId, panel);
-    getLookAndFeel().setColour (AlertWindow::backgroundColourId, panel.brighter (0.03f));
-    getLookAndFeel().setColour (AlertWindow::textColourId, text);
-    getLookAndFeel().setColour (AlertWindow::outlineColourId, line);
-    getLookAndFeel().setColour (TextEditor::textColourId, text);
-    getLookAndFeel().setColour (TextEditor::focusedOutlineColourId, accent);
-    getLookAndFeel().setColour (Label::textColourId, text);
+    applyLookAndFeelColours();
 
     // ---- browser
     scanThread.startThread (Thread::Priority::low);
@@ -586,7 +583,9 @@ PadRomplerEditor::PadRomplerEditor (PadRomplerProcessor& p)
     }
 
     // ---- top bar
-    for (auto* b : { &saveKitButton, &loadKitButton }) { styleButton (*b); addAndMakeVisible (b); }
+    for (auto* b : { &saveKitButton, &loadKitButton, &themeButton }) { styleButton (*b); addAndMakeVisible (b); }
+    themeButton.setTooltip ("Colour theme for FlipKit64's window (the TempoPAD's lights don't change)");
+    themeButton.onClick = [this] { showThemeMenu(); };
     supportLink.setColour (HyperlinkButton::textColourId, accent);
     supportLink.setFont (Font (12.0f, Font::bold), false, Justification::centredRight);
     supportLink.setTooltip ("FlipKit64 is free - tips on Ko-fi keep it going");
@@ -626,6 +625,15 @@ PadRomplerEditor::PadRomplerEditor (PadRomplerProcessor& p)
     proc.transportMsg[PadRomplerProcessor::tbRecord] = settings->getIntValue ("transportRecord", 0);
     smartSort = settings->getBoolValue ("smartSort", true);
     proc.easyLayout = jlimit (0, 2, settings->getIntValue ("easyLayout", 0));
+    {   // MIDI learn: the note for each pad, 64 numbers (-1 = none); missing = the TempoPAD layout
+        StringArray notes;
+        notes.addTokens (settings->getValue ("padNotes"), ",", "");
+        notes.removeEmptyStrings();
+        if (notes.size() == PadLayout::numPads)
+        {
+            for (int p = 0; p < PadLayout::numPads; ++p) proc.setPadNote (p, notes[p].getIntValue());
+        }
+    }
     styleLabel (ctrlLabel, 11.0f, accent);
     ctrlLabel.setFont (Font (11.0f, Font::bold));
     ctrlLabel.setJustificationType (Justification::centred);
@@ -636,8 +644,109 @@ PadRomplerEditor::PadRomplerEditor (PadRomplerProcessor& p)
     showTab (0);
     selectPad (0);
     updateCtrlLabel();
+
+    {   // the saved theme (a preset by name, so preset updates come through, or custom colours)
+        auto saved = Theme::fromString (settings->getValue ("theme"), defaultTheme());
+        if (auto* preset = findPreset (saved.name)) saved = *preset;
+        const auto now = currentTheme();
+        if (! saved.sameColours (now) || saved.name != now.name) setTheme (saved, false);
+    }
+
     setSize (1280, 780);
     startTimerHz (30);
+}
+
+void PadRomplerEditor::applyLookAndFeelColours()
+{
+    if (auto* v4 = dynamic_cast<LookAndFeel_V4*> (&getLookAndFeel()))
+    {   // the base scheme first (call-out boxes, tooltips, tree views...), then FlipKit64's own colours on top
+        v4->setColourScheme ({ bg, panel, panel.brighter (0.04f), line, text, accent, text, accent.withAlpha (0.4f), text });
+    }
+    getLookAndFeel().setColour (ResizableWindow::backgroundColourId, bg);
+    getLookAndFeel().setColour (ComboBox::backgroundColourId, panel.brighter (0.06f));
+    getLookAndFeel().setColour (ComboBox::textColourId, text);
+    getLookAndFeel().setColour (ComboBox::outlineColourId, line);
+    getLookAndFeel().setColour (PopupMenu::backgroundColourId, panel.brighter (0.04f));
+    getLookAndFeel().setColour (PopupMenu::textColourId, text);
+    getLookAndFeel().setColour (PopupMenu::highlightedBackgroundColourId, accent.withAlpha (0.4f));
+    getLookAndFeel().setColour (ComboBox::arrowColourId, text);
+    getLookAndFeel().setColour (TextButton::buttonColourId, panel.brighter (0.08f));
+    getLookAndFeel().setColour (DirectoryContentsDisplayComponent::highlightColourId, right.withAlpha (0.35f));
+    getLookAndFeel().setColour (ToggleButton::textColourId, text);
+    getLookAndFeel().setColour (ToggleButton::tickColourId, accent);
+    getLookAndFeel().setColour (ToggleButton::tickDisabledColourId, muted);
+    getLookAndFeel().setColour (ScrollBar::thumbColourId, right.withAlpha (0.6f));
+    getLookAndFeel().setColour (Slider::backgroundColourId, line);
+    getLookAndFeel().setColour (Slider::trackColourId, right);
+    getLookAndFeel().setColour (Slider::thumbColourId, accent);
+    getLookAndFeel().setColour (TextEditor::backgroundColourId, panel.brighter (0.06f));
+    getLookAndFeel().setColour (TextEditor::outlineColourId, line);
+    getLookAndFeel().setColour (ListBox::backgroundColourId, panel);
+    getLookAndFeel().setColour (AlertWindow::backgroundColourId, panel.brighter (0.03f));
+    getLookAndFeel().setColour (AlertWindow::textColourId, text);
+    getLookAndFeel().setColour (AlertWindow::outlineColourId, line);
+    getLookAndFeel().setColour (TextEditor::textColourId, text);
+    getLookAndFeel().setColour (TextEditor::focusedOutlineColourId, accent);
+    getLookAndFeel().setColour (Label::textColourId, text);
+    getLookAndFeel().setColour (TooltipWindow::backgroundColourId, panel.brighter (0.06f));
+    getLookAndFeel().setColour (TooltipWindow::textColourId, text);
+    getLookAndFeel().setColour (TooltipWindow::outlineColourId, line);
+    getLookAndFeel().setColour (TreeView::backgroundColourId, Colours::transparentBlack);
+    getLookAndFeel().setColour (PopupMenu::headerTextColourId, muted);
+    getLookAndFeel().setColour (PopupMenu::highlightedTextColourId, text);
+}
+
+void PadRomplerEditor::setTheme (const Theme& t, bool save)
+{
+    applyTheme (t, this);          // palette + every control coloured from it
+    applyLookAndFeelColours();
+    sendLookAndFeelChange();       // controls that only use LookAndFeel colours pick them up
+    if (auto* top = getTopLevelComponent()) top->repaint();
+    repaint();
+    if (save && settings != nullptr)
+    {
+        settings->setValue ("theme", t.toString());
+        if (findPreset (t.name) == nullptr) settings->setValue ("customTheme", t.toString());
+        // no saveIfNeeded here: the custom editor calls this on every drag; the file saves itself shortly after
+    }
+}
+
+void PadRomplerEditor::showThemeMenu()
+{
+    PopupMenu m;
+    const auto now = currentTheme();
+    m.addSectionHeader ("Theme");
+    int id = 1;
+    for (auto& t : themePresets()) { m.addItem (id, t.name, true, t.name == now.name); ++id; }
+    m.addSeparator();
+    m.addItem (100, "Custom colours...", true, findPreset (now.name) == nullptr);
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (&themeButton),
+                     [safe = Component::SafePointer<PadRomplerEditor> (this)] (int r)
+    {
+        if (safe == nullptr || r == 0) return;
+        if (r == 100) { safe->openCustomTheme(); return; }
+        if (r >= 1 && r <= (int) themePresets().size())
+        {
+            safe->setTheme (themePresets()[(size_t) (r - 1)]);
+            if (safe->settings != nullptr) safe->settings->saveIfNeeded();
+        }
+    });
+}
+
+void PadRomplerEditor::openCustomTheme()
+{
+    // Start from your last custom colours if there are some, otherwise from what's showing now.
+    auto start = currentTheme();
+    if (settings != nullptr && settings->containsKey ("customTheme") && findPreset (start.name) != nullptr)
+        start = Theme::fromString (settings->getValue ("customTheme"), start);
+    start.name = "Custom";
+    setTheme (start);
+
+    auto ed = std::make_unique<ThemeEditor> (start, [safe = Component::SafePointer<PadRomplerEditor> (this)] (const Theme& t)
+    {
+        if (safe != nullptr) safe->setTheme (t);
+    });
+    CallOutBox::launchAsynchronously (std::move (ed), themeButton.getScreenBounds(), nullptr);
 }
 
 PadRomplerEditor::~PadRomplerEditor()
@@ -647,6 +756,7 @@ PadRomplerEditor::~PadRomplerEditor()
    #endif
     proc.onPadsChanged = nullptr;
     proc.samplerView = false;
+    proc.padLearn = -1;
     if (logStream != nullptr) midiLogChanged (false);
     if (proc.lights != nullptr) proc.lights->samplerInfo = nullptr;
     fileTree.removeListener (this);
@@ -1039,7 +1149,7 @@ void PadRomplerEditor::splitStemsRequested (const SamplePtr& sample)
     if (StemSeparator::modelPresent()) { go(); return; }
 
     auto* ask = new AlertWindow ("Download the stem model?",
-                                 "Splitting stems needs a one-time download of the HTDemucs model (about 91 MB) from Hugging Face "
+                                 "Splitting stems needs a one-time download of the HTDemucs model (about 110 MB) from Hugging Face "
                                  "(HRSadeghi/demucs-onnx). It is saved on this computer and everything runs locally after that.\n\n"
                                  "The model's weights come from Meta's Demucs, whose licence terms are worth a look before you use stems commercially.",
                                  MessageBoxIconType::NoIcon);
@@ -1073,6 +1183,70 @@ void PadRomplerEditor::transportButtonsChanged()
     const char* keys[] = { "transportStop", "transportPlay", "transportRecord" };
     for (int b = 0; b < PadRomplerProcessor::numTransportButtons; ++b) settings->setValue (keys[b], proc.transportMsg[b].load());
     settings->saveIfNeeded();
+}
+
+void PadRomplerEditor::padNotesChanged()
+{
+    if (settings != nullptr)
+    {
+        if (proc.padNotesAreDefault()) settings->removeValue ("padNotes");
+        else
+        {
+            StringArray notes;
+            for (int p = 0; p < PadLayout::numPads; ++p) notes.add (String (proc.getPadNote (p)));
+            settings->setValue ("padNotes", notes.joinIntoString (","));
+        }
+        settings->saveIfNeeded();
+    }
+    for (auto* b : padsPage.padButtons) b->repaint();
+}
+
+void PadRomplerEditor::padLearnMessage()
+{
+    if (padLearnWindow == nullptr || learnPad < 0) return;
+    const int r = learnPad / PadLayout::cols, c = learnPad % PadLayout::cols;
+    padLearnWindow->setMessage ("Hit the pad on your controller that should play FlipKit64 pad "
+                                + String (PadLayout::noteForPad (learnPad)) + " (row " + String (r + 1) + ", column " + String (c + 1) + ").\n\n"
+                                + (learnInOrder ? "Then keep going: each hit teaches the next pad, left to right, top to bottom. Press Done when you've taught enough."
+                                                : "It learns the next note your controller sends."));
+}
+
+void PadRomplerEditor::learnPadNotes (int firstPad, bool inOrder)
+{
+    if (! isPositiveAndBelow (firstPad, PadLayout::numPads)) return;
+    learnPad = firstPad;
+    learnInOrder = inOrder;
+    learnSeen = proc.padLearned.load();
+    selectPad (learnPad);
+    proc.padLearn = learnPad;
+    padLearnWindow = std::make_unique<AlertWindow> ("MIDI learn", "", MessageBoxIconType::NoIcon, this);
+    padLearnMessage();
+    padLearnWindow->addButton (inOrder ? "Done" : "Cancel", 0, KeyPress (KeyPress::escapeKey));
+    padLearnWindow->enterModalState (true, ModalCallbackFunction::create ([this] (int)
+    {
+        proc.padLearn = -1;
+        learnPad = -1;
+        padNotesChanged();
+    }), false);
+}
+
+void PadRomplerEditor::padLearnTick()
+{
+    if (padLearnWindow == nullptr || learnPad < 0) return;
+    const int seen = proc.padLearned.load();
+    if (seen == learnSeen) return;                       // nothing taught yet
+    learnSeen = seen;
+    padNotesChanged();
+    if (learnInOrder && learnPad + 1 < PadLayout::numPads)
+    {
+        ++learnPad;
+        selectPad (learnPad);
+        proc.padLearn = learnPad;
+        padLearnMessage();
+        return;
+    }
+    padLearnWindow->exitModalState (0);                 // taught: close
+    padLearnWindow.reset();
 }
 
 void PadRomplerEditor::midiLogChanged (bool on)
@@ -1205,6 +1379,7 @@ void PadRomplerEditor::timerCallback()
 {
     sequencerPage.historyTick();
     drainMidiLog();
+    padLearnTick();
     // Follow the TempoPAD's mode buttons: User/Easy open the sequencer, Drum goes back.
     const int mode = proc.ctrlMode.load();
     if (mode != lastCtrlMode)
@@ -1253,14 +1428,16 @@ void PadRomplerEditor::resized()
     auto top = area.removeFromTop (52).reduced (16, 12);
     top.removeFromLeft (205);
     for (auto& t : tabButtons) { t.setBounds (top.removeFromLeft (110)); top.removeFromLeft (6); }
-    masterSlider.setBounds (top.removeFromRight (150));
-    masterLabel.setBounds (top.removeFromRight (54));
-    top.removeFromRight (16);
-    loadKitButton.setBounds (top.removeFromRight (96));
-    top.removeFromRight (8);
-    saveKitButton.setBounds (top.removeFromRight (96));
-    top.removeFromRight (8);
-    supportLink.setBounds (top.removeFromRight (140));
+    masterSlider.setBounds (top.removeFromRight (124));
+    masterLabel.setBounds (top.removeFromRight (50));
+    top.removeFromRight (12);
+    themeButton.setBounds (top.removeFromRight (62));
+    top.removeFromRight (6);
+    loadKitButton.setBounds (top.removeFromRight (86));
+    top.removeFromRight (6);
+    saveKitButton.setBounds (top.removeFromRight (86));
+    top.removeFromRight (6);
+    supportLink.setBounds (top.removeFromRight (122));
     ctrlLabel.setBounds (top.reduced (6, 0));
 
     area.reduce (12, 0);

@@ -8,16 +8,20 @@
 using namespace juce;
 
 // ---------------------------------------------------------------------------------------------
-// Model location. htdemucs_fp16.onnx from HRSadeghi/demucs-onnx on Hugging Face (fp16 weights, fp32
-// I/O, 91.3 MB; the graph is cut at the complex boundary, so STFT / iSTFT / overlap-add are done
+// Model location. htdemucs_6s.onnx from HRSadeghi/demucs-onnx on Hugging Face (six stems: drums, bass,
+// other, vocals, guitar, piano; 110.4 MB, same tensor layout as the 4-stem model; the graph is cut at the complex boundary, so STFT / iSTFT / overlap-add are done
 // here). Not hosted by FlipKit64.
 // LICENCE: the repo's README says the weights carry Meta's Demucs terms and calls them
 // non-commercial (CC BY-NC 4.0); Meta's own repo is MIT and other mirrors say MIT. Check before
 // anyone uses this in a paid product.
 // ---------------------------------------------------------------------------------------------
-static const char* const kModelUrl  = "https://huggingface.co/HRSadeghi/demucs-onnx/resolve/main/htdemucs_fp16.onnx";
-static const char* const kModelName = "htdemucs_fp16.onnx";
-static constexpr int64   kModelBytes = 91312383;                 // exact size, checked after download and on load
+static const char* const kModelUrl  = "https://huggingface.co/HRSadeghi/demucs-onnx/resolve/main/htdemucs_6s.onnx";
+static const char* const kModelName = "htdemucs_6s.onnx";
+// The repo lists 110.4 MB; the exact byte count isn't known here, so the size check is a window around it
+// (a cut-off download is far smaller, and curl --fail / the stream length catch short transfers too).
+static constexpr int64   kModelBytes    = 110400000;              // for progress
+static constexpr int64   kModelMinBytes = 110000000, kModelMaxBytes = 110900000;
+static bool sizeOk (int64 n) { return n >= kModelMinBytes && n <= kModelMaxBytes; }
 
 // =============================================================================================
 // StemDsp: STFT / inverse STFT exactly as Demucs does them around the network.
@@ -414,7 +418,7 @@ StemSeparator::~StemSeparator() = default;
 
 const char* StemSeparator::stemName (int stem)
 {
-    static const char* const names[numStems] = { "drums", "bass", "other", "vocals" };
+    static const char* const names[numStems] = { "drums", "bass", "other", "vocals", "guitar", "piano" };
     return (stem >= 0 && stem < numStems) ? names[stem] : "";
 }
 
@@ -424,14 +428,14 @@ File StemSeparator::stemsFolder()
 }
 
 File StemSeparator::modelFile()     { return stemsFolder().getChildFile (kModelName); }
-bool StemSeparator::modelPresent()  { auto f = modelFile(); return f.existsAsFile() && f.getSize() == kModelBytes; }
+bool StemSeparator::modelPresent()  { auto f = modelFile(); return f.existsAsFile() && sizeOk (f.getSize()); }
 bool StemSeparator::runtimeAvailable() { return getRuntime()->api != nullptr; }
 
 String StemSeparator::runtimeStatus()
 {
     auto* rt = getRuntime();
     if (rt->api == nullptr) return rt->error;
-    if (! modelPresent()) return "Model not downloaded yet (about 91 MB)";
+    if (! modelPresent()) return "Model not downloaded yet (about 110 MB)";
     return "Ready";
 }
 
@@ -500,7 +504,7 @@ String StemSeparator::downloadModel (Progress progress)
 
     if (cancelled) { part.deleteFile(); return "cancelled"; }
     if (error.isNotEmpty()) { part.deleteFile(); return error; }
-    if (part.getSize() != kModelBytes) { part.deleteFile(); return "The download was incomplete"; }
+    if (! sizeOk (part.getSize())) { part.deleteFile(); return "The download was incomplete"; }
 
     auto dest = modelFile();
     dest.deleteFile();

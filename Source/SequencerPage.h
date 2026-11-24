@@ -1,6 +1,7 @@
 #pragma once
 #include "Common.h"
 #include "KeysRoll.h"
+#include "SongPanel.h"
 
 class SequencerPage;
 
@@ -103,6 +104,7 @@ public:
     PadRomplerProcessor& getProc() { return proc; }
     EditorContext& getCtx() { return ctx; }
     void selectTrack (int t);              // 0 = drums, 1..4 = Keys tracks
+    void showSong();                       // the Song tab: rows of patterns
     int getSelectedTrack() const { return selectedTrack; }
 
 private:
@@ -147,11 +149,18 @@ private:
     VelocityLane velLane { roll };
     NotePanel notePanel { *this, roll };
     juce::TextButton trackButtons[1 + Keys::numTracks];
+    juce::TextButton songTab { "Song" }, songModeButton { "Song mode" };
+    SongPanel songPanel { ctx };
+    bool songView = false;
+    void syncSongView();
     juce::Label soundLabel, rootLabel;
     juce::ComboBox soundBox, rootBox, scaleRootBox, scaleTypeBox;
     juce::ToggleButton monoToggle { "Mono" }, snapToggle { "Snap to scale" }, ghostToggle { "Show other tracks" },
                        padsPlayToggle { "Pads play this track" };
     juce::Slider glideSlider;
+    juce::TextButton midiOutButton;        // this Keys track -> a hardware synth (MIDI out device + channel)
+    void showMidiOutMenu();
+    void updateMidiOutButton();
     int selectedTrack = 0;
     juce::uint32 lastKeysRecorded = 0;
     int lastKeysStep = -2;

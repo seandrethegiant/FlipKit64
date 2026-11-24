@@ -9,7 +9,7 @@
 #include <vector>
 
 // ---------------------------------------------------------------------------------------------
-// Stem separation (drums / bass / other / vocals) with HTDemucs, run locally through ONNX Runtime.
+// Stem separation (drums / bass / other / vocals / guitar / piano) with HTDemucs 6-stem, run locally through ONNX Runtime.
 //
 // - The model (an MIT-licensed ONNX export of Meta's HTDemucs) is NOT bundled. It is downloaded
 //   once on first use into <app data>/FlipKit64/stems/.
@@ -43,8 +43,8 @@ namespace StemDsp
 class StemSeparator
 {
 public:
-    enum Stem { Drums = 0, Bass, Other, Vocals, numStems };
-    static const char* stemName (int stem);                  // "drums", "bass", "other", "vocals"
+    enum Stem { Drums = 0, Bass, Other, Vocals, Guitar, Piano, numStems };
+    static const char* stemName (int stem);                  // "drums", "bass", "other", "vocals", "guitar", "piano"
 
     // Return false from the callback to cancel. fraction is 0..1.
     using Progress = std::function<bool (float fraction)>;

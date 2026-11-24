@@ -25,10 +25,11 @@ PadRomplerProcessor::PadRomplerProcessor()
 {
     formats.registerBasicFormats();
 
-    std::fill (std::begin (noteToPad), std::end (noteToPad), -1);
+    for (auto& d : defaultNoteToPad) d = -1;
     for (int r = 0; r < PadLayout::rows; ++r)
         for (int c = 0; c < PadLayout::cols; ++c)
-            noteToPad[PadLayout::noteFor (r, c)] = PadLayout::padIndex (r, c);
+            defaultNoteToPad[PadLayout::noteFor (r, c)] = PadLayout::padIndex (r, c);
+    resetPadNotes();
 
     for (auto& p : pads)
         p = std::make_shared<const PadState>();
@@ -200,6 +201,7 @@ void PadRomplerProcessor::newKit()
     for (auto& pat : patterns) { pat.clear(); pat.length = 16; pat.stepsPer2Beats = 8; }
     resetKeysTracks();
     scaleRoot = 0; scaleType = 0;
+    song.clear(); songMode = false; songLoop = true; songCursor = 0;
     queuedPattern = -1;
     currentPattern = 0;
     kitLoads.fetch_add (1);
@@ -234,6 +236,7 @@ void PadRomplerProcessor::resetKeysTracks()
         auto& kt = keysTracks[t];
         kt.name = "Keys " + String (t + 1);
         kt.sourcePad = -1; kt.root = 60; kt.mono = false; kt.glideMs = 0.0f; kt.level = 1.0f; kt.sliceCount = 0;
+        kt.midiChannel = 0; kt.midiSound = false;
     }
     keysTracks[1].name = "Bass";                 // a mono, gliding bass track out of the box
     keysTracks[1].mono = true;
@@ -367,14 +370,17 @@ int PadRomplerProcessor::popTapEvents (TapEvent* out, int max)
 void PadRomplerProcessor::selectPattern (int p)
 {
     p = jlimit (0, Seq::numPatterns - 1, p);
-    if (hostPlaying.load() || internalPlaying.load()) queuedPattern = p;
+    const bool playing = hostPlaying.load() || internalPlaying.load();
+    if (playing && songMode.load() && song.rows() > 0) return;     // the song decides what plays
+    if (playing) queuedPattern = p;
     else { currentPattern = p; queuedPattern = -1; }
 }
 
 int PadRomplerProcessor::captureToPattern()
 {
-    const double now = lastPpqEnd.load();
-    if (now < 0.0) return -1;
+    const double origin = seqOrigin.load();           // song mode: times count from the row's start
+    const double now = lastPpqEnd.load() - origin;
+    if (lastPpqEnd.load() < 0.0) return -1;
     auto& pat = patterns[jlimit (0, Seq::numPatterns - 1, currentPattern.load())];
     const int len = jlimit (1, Seq::maxSteps, pat.length.load());
     const double stepLen = pat.stepLength();
@@ -385,7 +391,7 @@ int PadRomplerProcessor::captureToPattern()
     const uint32_t count = jmin<uint32_t> (n, (uint32_t) capSize);
     // the last loop's worth of playing; if you stopped a while ago, the loop that ended with your last hit
     double end = now, latest = -1.0;
-    for (uint32_t i = n - count; i < n; ++i) latest = jmax (latest, capLog[i % capSize].ppq.load());
+    for (uint32_t i = n - count; i < n; ++i) latest = jmax (latest, capLog[i % capSize].ppq.load() - origin);
     if (latest < 0.0) return 0;
     if (latest < now - loopBeats) end = latest + stepLen * 0.5;
     const double from = end - loopBeats;
@@ -394,8 +400,8 @@ int PadRomplerProcessor::captureToPattern()
     for (uint32_t i = n - count; i < n; ++i)
     {
         const auto& e = capLog[i % capSize];
-        const double t = e.ppq.load();
-        if (t < from || t >= end) continue;
+        const double t = e.ppq.load() - origin;
+        if (t < 0.0 || t < from || t >= end) continue;
         const int pad = jlimit (0, PadLayout::numPads - 1, e.pad.load());
         const int idx = (int) (nearestStep (t, stepLen, swingOff) % len);
         const auto v = (uint8_t) jlimit (1, 127, (int) std::lround (e.vel.load() * 127.0f));
@@ -406,9 +412,26 @@ int PadRomplerProcessor::captureToPattern()
     return captured;
 }
 
+bool PadRomplerProcessor::setMidiOutDevice (const String& deviceName)
+{
+    midiOutWanted = deviceName;
+    return extMidi.open (deviceName);
+}
+
 void PadRomplerProcessor::timerCallback()
 {
     drainKeyRecordings();
+    if (midiOutPending.exchange (false))
+    {
+        String want;
+        { const SpinLock::ScopedLockType sl (midiOutPendingLock); want = midiOutPendingOpen; }
+        setMidiOutDevice (want);
+    }
+    else if (midiOutWanted.isNotEmpty() && ! extMidi.isOpen())        // plugged in later: connect when it shows up
+    {
+        static int tick = 0;
+        if (++tick % 4 == 0) extMidi.open (midiOutWanted);
+    }
     noteRegistry.erase (std::remove_if (noteRegistry.begin(), noteRegistry.end(),
                                         [] (const Keys::NotesPtr& p) { return p.use_count() == 1; }),
                         noteRegistry.end());
@@ -695,6 +718,25 @@ void PadRomplerProcessor::handleKeyHit (int t, int pitch, float velocity, int64 
         v->keysPitch = pitch;
 }
 
+// A Keys note for the MIDI out device. Returns whether FlipKit64 should also play it with the pad's sound:
+// tracks without a channel (or with no device open) play here as always; with a channel, only if
+// "Play the pad sound too" is on.
+bool PadRomplerProcessor::keysMidi (int t, int pitch, float velocity, int64 gate, int pos)
+{
+    if (! isPositiveAndBelow (t, Keys::numTracks)) return true;
+    const auto& kt = keysTracks[t];
+    const int ch = kt.midiChannel.load();
+    if (ch <= 0) return true;
+    if (velocity < 0.0f) extMidi.noteOff (ch, pitch, pos);
+    else
+    {
+        // gate > 0: a sequenced note / audition of that many samples; -1: held until its note-off
+        const int64 len = gate > 0 ? gate : (gate == 0 ? (int64) (0.25 * hostRate) : 0);
+        extMidi.noteOn (ch, pitch, jlimit (1, 127, roundToInt (velocity * 127.0f)), pos, len);
+    }
+    return kt.midiSound.load();
+}
+
 void PadRomplerProcessor::releaseKey (int t, int pitch)
 {
     for (auto& v : voices)
@@ -822,9 +864,96 @@ void PadRomplerProcessor::renderVoices (AudioBuffer<float>& buffer, int start, i
     }
 }
 
+double PadRomplerProcessor::patternBeats (int p) const
+{
+    const auto& pat = patterns[jlimit (0, Seq::numPatterns - 1, p)];
+    return jlimit (1, Seq::maxSteps, pat.length.load()) * pat.stepLength();
+}
+
+Song::Snapshot PadRomplerProcessor::songSnapshot() const
+{
+    double beats[Seq::numPatterns];
+    for (int p = 0; p < Seq::numPatterns; ++p) beats[p] = patternBeats (p);
+    Song::Snapshot s;
+    s.take (song, beats, Seq::numPatterns, songLoop.load());
+    return s;
+}
+
+void PadRomplerProcessor::songBlock (double ppq0, double ppq1)
+{
+    ignoreUnused (ppq1);
+    const auto s = songSnapshot();
+    songActive = false;
+    if (s.n <= 0) { songRow = -1; seqOrigin = 0.0; return; }        // empty song: the pattern plays as usual
+    queuedPattern = -1;
+    const auto now = Song::locate (s, ppq0);
+    if (! now.valid())                                               // past the end with Loop off
+    {
+        songActive = true;                                           // (plays nothing)
+        songRow = -1; playStep = -1;
+        if (internalPlaying.load() && ! hostPlaying.load()) internalPlaying = false;
+        return;
+    }
+    songActive = true;
+    songRow = now.row;
+    seqOrigin = now.start;
+    if (currentPattern.load() != now.pattern)
+    {
+        currentPattern = now.pattern;
+        std::memset (skipOnce, 0, sizeof (skipOnce));
+    }
+}
+
+void PadRomplerProcessor::scheduleLanes (const PatternData& pat, double origin, double until, double ppq0, double ppqPerSample,
+                                         int numSamples, Hit* hits, int& numHits, int maxHits, bool showPlayhead)
+{
+    const double ppq1 = ppq0 + ppqPerSample * numSamples;
+    const double swingOff = (2.0 * jlimit (50.0f, 75.0f, swing.load()) / 100.0 - 1.0);
+    for (int t = 0; t < Keys::numTracks; ++t)
+    {
+        const auto& lane = pat.lanes[t];
+        const int len = jlimit (1, Seq::maxSteps, lane.length.load());
+        const double sl = lane.stepLength();
+        const double loop = len * sl;
+        if (showPlayhead) keysStep[t] = (int) ((long long) std::floor (jmax (0.0, ppq0 - origin) / sl) % len);
+        auto notes = lane.get();
+        if (notes == nullptr) continue;
+        for (const auto& n : *notes)
+        {
+            if (n.step >= len) continue;
+            const double grid = n.step * sl, start = grid + ((n.step & 1) ? swingOff * sl : 0.0);
+            for (long long m = jmax (0LL, (long long) std::ceil ((ppq0 - origin - start) / loop)); ; ++m)
+            {
+                const double tt = origin + start + m * loop;
+                if (origin + grid + m * loop >= until || tt >= ppq1) break;   // the row has ended
+                if (tt < ppq0) continue;
+                if (numHits >= maxHits) return;
+                const int pos = jlimit (0, numSamples - 1, (int) ((tt - ppq0) / ppqPerSample));
+                const double beats = jmin (jmin ((double) n.len, (double) len) * sl, until - tt);   // cut off at the row's end
+                const auto gate = jmax ((int64) 1, (int64) (beats / ppqPerSample));
+                hits[numHits++] = { pos, -1, n.vel / 127.0f, t, n.pitch, gate };
+            }
+        }
+    }
+}
+
 void PadRomplerProcessor::scheduleKeys (double ppq0, double ppqPerSample, int numSamples,
                                         Hit* hits, int& numHits, int maxHits)
 {
+    if (songActive)
+    {
+        const auto s = songSnapshot();
+        const double ppq1 = ppq0 + ppqPerSample * numSamples;
+        bool shown = false;
+        Song::forEachRow (s, ppq0 - 1.0, ppq1, [&] (const Song::Placed& r)          // 1 beat back: swung notes land late
+        {
+            const bool here = ppq0 >= r.start && ppq0 < r.end;
+            shown = shown || here;
+            scheduleLanes (patterns[r.pattern], r.start, r.end, ppq0, ppqPerSample, numSamples, hits, numHits, maxHits, here);
+        });
+        if (! shown) for (auto& k : keysStep) k = -1;
+        return;
+    }
     const auto& pat = patterns[jlimit (0, Seq::numPatterns - 1, currentPattern.load())];
     const double ppq1 = ppq0 + ppqPerSample * numSamples;
     const double swingOff = (2.0 * jlimit (50.0f, 75.0f, swing.load()) / 100.0 - 1.0);
@@ -855,9 +984,60 @@ void PadRomplerProcessor::scheduleKeys (double ppq0, double ppqPerSample, int nu
     }
 }
 
+void PadRomplerProcessor::schedulePatternSteps (const PatternData& pat, double origin, long long maxK, long long seed,
+                                                double ppq0, double ppqPerSample, int numSamples, Hit* hits, int& numHits, int maxHits)
+{
+    const int len = jlimit (1, Seq::maxSteps, pat.length.load());
+    const double stepLen = pat.stepLength();
+    const double swingOff = (2.0 * jlimit (50.0f, 75.0f, swing.load()) / 100.0 - 1.0);
+    const double ppq1 = ppq0 + ppqPerSample * numSamples;
+    const auto kFirst = (long long) std::floor ((ppq0 - origin) / stepLen) - 2;
+    const auto kLast  = (long long) std::floor ((ppq1 - origin) / stepLen) + 1;
+    const bool fill = fillOn.load();
+    for (long long k = jmax (0LL, kFirst); k <= kLast && (maxK < 0 || k < maxK); ++k)
+    {
+        const double base = origin + k * stepLen + ((k & 1) ? swingOff * stepLen : 0.0);
+        const int stepIdx = (int) (k % len);
+        if (base >= ppq0 && base < ppq1) playStep = stepIdx;
+        for (int pad = 0; pad < PadLayout::numPads; ++pad)
+        {
+            const int vel = pat.vel[pad][stepIdx].load (std::memory_order_relaxed);
+            if (vel == 0) continue;
+            if (! Seq::condPasses (pat.cond[pad][stepIdx].load (std::memory_order_relaxed), k / len, fill)) continue;
+            const int ch = pat.chance[pad][stepIdx].load (std::memory_order_relaxed);
+            if (ch < 100 && stepRoll (k + seed, pad) >= ch) continue;
+            const double nudged = base + (pat.nudge[pad][stepIdx].load (std::memory_order_relaxed) - 128) / 100.0 * stepLen;
+            const int rat = jlimit (1, 4, (int) pat.ratchet[pad][stepIdx].load (std::memory_order_relaxed));
+            for (int j = 0; j < rat; ++j)
+            {
+                const double t = nudged + j * stepLen / rat;
+                if (t < ppq0 || t >= ppq1) continue;
+                if (j == 0 && skipOnce[pad][stepIdx]) { skipOnce[pad][stepIdx] = 0; continue; }
+                if (numHits >= maxHits) return;
+                const int pos = jlimit (0, numSamples - 1, (int) ((t - ppq0) / ppqPerSample));
+                const float v = (float) vel / 127.0f * (j == 0 ? 1.0f : 0.85f);
+                hits[numHits++] = { pos, pad, v, -1, 0, jmax ((int64) 1, (int64) (stepLen / rat / ppqPerSample)) };
+            }
+        }
+    }
+}
+
 void PadRomplerProcessor::scheduleSequencer (double ppq0, double ppqPerSample, int numSamples,
                                              Hit* hits, int& numHits, int maxHits)
 {
+    if (songActive)    // every row near this block: swing / late nudges reach up to a step past a row's end
+    {
+        const auto s = songSnapshot();
+        const double ppq1 = ppq0 + ppqPerSample * numSamples;
+        Song::forEachRow (s, ppq0 - 1.05, ppq1 + 0.55, [&] (const Song::Placed& r)
+        {
+            const auto& pat = patterns[r.pattern];
+            const long long maxK = (long long) r.repeats * jlimit (1, Seq::maxSteps, pat.length.load());
+            schedulePatternSteps (pat, r.start, maxK, r.pass * 1000003LL + r.row * 7919LL,
+                                  ppq0, ppqPerSample, numSamples, hits, numHits, maxHits);
+        });
+        return;
+    }
     int patIndex = jlimit (0, Seq::numPatterns - 1, currentPattern.load());
     const PatternData* pat = &patterns[patIndex];
     int len = jlimit (1, Seq::maxSteps, pat->length.load());
@@ -916,6 +1096,12 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
 {
     ScopedNoDenormals noDenormals;
     const int numSamples = buffer.getNumSamples();
+    const bool midiOut = extMidi.active();
+    if (midiOut)
+    {
+        extMidi.beginBlock (hostRate, numSamples);
+        if (midiPanicReq.exchange (false)) extMidi.allNotesOff (0);
+    }
 
     // keep a copy of the sampling input before the buffer becomes our output
     const bool haveInput = getTotalNumInputChannels() >= 2 && numSamples <= inputCopy.getNumSamples();
@@ -946,7 +1132,8 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
     blockBpm = (hostGaveBpm && (hostIsPlaying || ! intPlay)) ? hostBpm.load() : internalBpm.load();
     if (! running && intPlay)
     {
-        if (! wasInternalPlaying) internalPpq = 0.0;
+        if (! wasInternalPlaying)                // song mode starts from the chosen row
+            internalPpq = songMode.load() ? Song::rowStart (songSnapshot(), songCursor.load()) : 0.0;
         ppq0 = internalPpq;
         ppqPerSample = internalBpm.load() / 60.0 / hostRate;
         internalPpq += ppqPerSample * numSamples;
@@ -959,9 +1146,45 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
         for (auto& v : voices)
             if (v.active && ! v.releasing && (stopAll || v.pad >= 0 || v.keysTrack >= 0)) v.release (hostRate, 8.0);
         for (auto& h : held) h.on = false;
+        if (midiOut) extMidi.allNotesOff (0);
     }
     wasRunning = running;
+
+    // ---- MIDI clock to the MIDI out device: 24 per beat, Start (or Song Position + Continue) and Stop
+    if (midiOut && midiClockOut.load())
+    {
+        const auto first = (long long) std::ceil (ppq0 * 24.0 - 1.0e-6);
+        if (running && clockWasRunning && first < lastClockTick - 1)     // the host jumped back (a loop): re-sync
+        {
+            extMidi.stop (0); clockWasRunning = false;
+        }
+        if (running && ! clockWasRunning)
+        {
+            if (ppq0 < 1.0e-3) extMidi.start (0);
+            else { extMidi.songPosition (0, (int) std::floor (ppq0 * 4.0)); extMidi.continuePlayback (0); }
+            lastClockTick = first - 1;
+        }
+        else if (! running && clockWasRunning) extMidi.stop (0);
+        if (running && ppqPerSample > 0.0)
+        {
+            const double ppq1 = ppq0 + ppqPerSample * numSamples;
+            // each tick once: block edges from the host don't always line up to the last bit
+            for (long long k = jmax (first, lastClockTick + 1); (double) k / 24.0 < ppq1; ++k)
+            {
+                extMidi.clockTick (jlimit (0, numSamples - 1, (int) (((double) k / 24.0 - ppq0) / ppqPerSample)));
+                lastClockTick = k;
+            }
+        }
+        clockWasRunning = running;
+    }
+    else
+    {
+        if (midiOut && clockWasRunning) extMidi.stop (0);
+        clockWasRunning = false;
+    }
     lastPpqEnd = running ? ppq0 + ppqPerSample * numSamples : -1.0;
+    if (running && songMode.load()) songBlock (ppq0, ppq0 + ppqPerSample * numSamples);
+    else { songRow = -1; seqOrigin = 0.0; songActive = false; }
     if (! running)
     {
         if (playStep.load() != -1) std::memset (skipOnce, 0, sizeof (skipOnce));
@@ -1034,8 +1257,8 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
                 const int len = jlimit (1, Seq::maxSteps, pat.length.load());
                 const double stepLen = pat.stepLength();
                 const double swingOff = (2.0 * jlimit (50.0f, 75.0f, swing.load()) / 100.0 - 1.0);
-                const double t = ppq0 + pos * ppqPerSample;
-                const long long best = nearestStep (t, stepLen, swingOff);
+                const double t = ppq0 + pos * ppqPerSample - seqOrigin.load();   // song mode: from the row's start
+                const long long best = nearestStep (jmax (0.0, t), stepLen, swingOff);
                 const double bestTime = best * stepLen + ((best & 1) ? swingOff * stepLen : 0.0);
                 const int idx = (int) (best % len);
                 pat.setStep (pad, idx, (uint8_t) jlimit (1, 127, (int) std::lround (vel * 127.0f)));
@@ -1127,11 +1350,11 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
                 const int b = d[0];
                 if ((b & 0x40) != 0)                              // release
                 {
-                    const int rp = noteToPad[36 + (b & 0x3F)];
+                    const int rp = defaultNoteToPad[36 + (b & 0x3F)];
                     if (rp >= 0) { held[rp].on = false; if (numHits < maxHits) hits[numHits++] = { pos, rp, -1.0f }; }
                     continue;
                 }
-                const int pad = noteToPad[36 + (b & 0x3F)];
+                const int pad = defaultNoteToPad[36 + (b & 0x3F)];
                 if (pad < 0) continue;
                 if (samplerView.load())                           // Sampler tab: chop with the pads
                 {
@@ -1168,6 +1391,17 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
         }
         if (msg.isMidiStart() || msg.isMidiContinue()) { transportAction (tbPlay, hostIsPlaying); continue; }
         if (msg.isMidiStop()) { transportAction (tbStop, hostIsPlaying); continue; }
+        if (msg.isNoteOn())                                   // MIDI learn: this note now plays the pad being taught
+        {
+            const int lp = padLearn.load();
+            if (lp >= 0 && lp < PadLayout::numPads)
+            {
+                setPadNote (lp, msg.getNoteNumber());
+                padLearn = -1;
+                padLearned.fetch_add (1);
+                continue;                                     // while teaching, nothing else reacts
+            }
+        }
         if (msg.isController() || msg.isNoteOn())             // Play / Stop / Record sent as a CC or note
         {
             const bool isCC = msg.isController();
@@ -1213,7 +1447,8 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
                 const int note = msg.getNoteNumber();
                 const float v = touch (msg.getFloatVelocity());
                 if (numHits < maxHits) hits[numHits++] = { pos, -1, v, keysTrackIn, note, -1 };
-                keyDown[note] = { keysTrackIn, running ? ppq0 + pos * ppqPerSample : -1.0, v, currentPattern.load() };
+                const double org = seqOrigin.load();
+                keyDown[note] = { keysTrackIn, running ? jmax (0.0, ppq0 + pos * ppqPerSample - org) : -1.0, v, currentPattern.load(), org };
                 continue;
             }
             if (padModes) { ctrlMode = ctrlPads; stepTarget = pad; }
@@ -1229,7 +1464,7 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
                 if (numHits < maxHits) hits[numHits++] = { pos, -1, -1.0f, kd.track, note, 0 };
                 if (running && seqRecord.load() && kd.ppq >= 0.0)
                 {
-                    const double off = ppq0 + pos * ppqPerSample;
+                    const double off = ppq0 + pos * ppqPerSample - kd.origin;
                     int s1, n1, s2, n2;
                     keyRecFifo.prepareToWrite (1, s1, n1, s2, n2);
                     if (n1 > 0) { keyRecBuf[s1] = { kd.track, kd.pattern, note, kd.ppq, jmax (off, kd.ppq), kd.vel }; keyRecFifo.finishedWrite (1); }
@@ -1249,6 +1484,7 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
             for (auto& v : voices) if (v.active) v.release (hostRate);
             for (auto& h : held) h.on = false;
             for (auto& k : keyDown) k = {};
+            if (midiOut) extMidi.allNotesOff (pos);
         }
     }
 
@@ -1305,7 +1541,12 @@ void PadRomplerProcessor::processBlock (AudioBuffer<float>& buffer, MidiBuffer& 
         renderVoices (buffer, rendered, hits[i].pos - rendered);
         rendered = jmax (rendered, hits[i].pos);
         const auto& h = hits[i];
-        if (h.track >= 0) { if (h.velocity < 0.0f) releaseKey (h.track, h.pitch); else handleKeyHit (h.track, h.pitch, h.velocity, h.gate); }
+        if (h.track >= 0)
+        {
+            const bool here = ! midiOut || keysMidi (h.track, h.pitch, h.velocity, h.gate, h.pos);
+            if (h.velocity < 0.0f) releaseKey (h.track, h.pitch);
+            else if (here) handleKeyHit (h.track, h.pitch, h.velocity, h.gate);
+        }
         else if (h.velocity < -1.5f) { for (auto& v : voices) if (v.active && v.pad == h.pad && v.keysTrack < 0) v.noteOff(); }
         else if (h.velocity < 0.0f) padRelease (h.pad);
         else handleHit (h.pad, h.velocity, h.gate);
@@ -1540,6 +1781,26 @@ std::unique_ptr<XmlElement> PadRomplerProcessor::kitToXml() const
         ke->setAttribute ("glide", (double) kt.glideMs.load());
         ke->setAttribute ("level", (double) kt.level.load());
         if (kt.sliceCount.load() > 0) ke->setAttribute ("slices", kt.sliceCount.load());
+        if (kt.midiChannel.load() > 0) ke->setAttribute ("midiChannel", kt.midiChannel.load());
+        if (kt.midiSound.load()) ke->setAttribute ("midiSound", true);
+    }
+    if (midiOutWanted.isNotEmpty())               // only kits made with a synth hooked up pick a device
+    {
+        seq->setAttribute ("midiOut", midiOutWanted);
+        seq->setAttribute ("midiClock", midiClockOut.load());
+        seq->setAttribute ("midiOffset", (double) extMidi.offsetMs.load());
+    }
+    if (song.rows() > 0 || songMode.load())
+    {
+        auto* se = seq->createNewChildElement ("Song");
+        se->setAttribute ("on", songMode.load());
+        se->setAttribute ("loop", songLoop.load());
+        for (int i = 0; i < song.rows(); ++i)
+        {
+            auto* re = se->createNewChildElement ("Row");
+            re->setAttribute ("pattern", (int) song.pattern[i].load());
+            re->setAttribute ("repeats", (int) song.repeats[i].load());
+        }
     }
     return xml;
 }
@@ -1598,6 +1859,7 @@ void PadRomplerProcessor::kitFromXml (const XmlElement& xml)
     for (auto& pat : patterns) { pat.clear(); pat.length = 16; pat.stepsPer2Beats = 8; }
     resetKeysTracks();
     scaleRoot = 0; scaleType = 0;
+    song.clear(); songMode = false; songLoop = true; songCursor = 0;   // kits from before song mode: no song
     if (auto* seq = xml.getChildByName ("Sequencer"))
     {
         swing = (float) seq->getDoubleAttribute ("swing", 50.0);
@@ -1659,8 +1921,31 @@ void PadRomplerProcessor::kitFromXml (const XmlElement& xml)
             kt.glideMs = (float) jlimit (0.0, 1000.0, ke->getDoubleAttribute ("glide", 0.0));
             kt.level = (float) jlimit (0.0, 2.0, ke->getDoubleAttribute ("level", 1.0));
             kt.sliceCount = jlimit (0, PadLayout::numPads, ke->getIntAttribute ("slices", 0));
+            kt.midiChannel = jlimit (0, 16, ke->getIntAttribute ("midiChannel", 0));
+            kt.midiSound = ke->getBoolAttribute ("midiSound", false);
         }
+        if (seq->getStringAttribute ("midiOut").isNotEmpty())   // other kits keep whatever device is open
+        {
+            midiClockOut = seq->getBoolAttribute ("midiClock", false);
+            extMidi.offsetMs = (float) jlimit (-100.0, 200.0, seq->getDoubleAttribute ("midiOffset", 0.0));
+            const String want = seq->getStringAttribute ("midiOut");
+            if (MessageManager::existsAndIsCurrentThread()) setMidiOutDevice (want);
+            else
+            {
+                { const SpinLock::ScopedLockType sl (midiOutPendingLock); midiOutPendingOpen = want; }
+                midiOutPending = true;
+            }
+        }
+        midiPanicReq = true;                         // channels may have changed: nothing left hanging
         currentPattern = jlimit (0, Seq::numPatterns - 1, seq->getIntAttribute ("pattern", 0));
+        if (auto* se = seq->getChildByName ("Song"))
+        {
+            for (auto* re : se->getChildWithTagNameIterator ("Row"))
+                song.insert (song.rows(), jlimit (0, Seq::numPatterns - 1, re->getIntAttribute ("pattern", 0)),
+                             jlimit (1, Song::maxRepeats, re->getIntAttribute ("repeats", 1)));
+            songLoop = se->getBoolAttribute ("loop", true);
+            songMode = se->getBoolAttribute ("on", false);
+        }
     }
     kitLoads.fetch_add (1);
     if (onPadsChanged) onPadsChanged();
@@ -1694,6 +1979,33 @@ bool PadRomplerProcessor::loadKit (const File& file)
 AudioProcessorEditor* PadRomplerProcessor::createEditor() { return new PadRomplerEditor (*this); }
 
 AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new PadRomplerProcessor(); }
+
+int PadRomplerProcessor::getPadNote (int pad) const
+{
+    for (int n = 0; n < 128; ++n)
+        if (noteToPad[n].load (std::memory_order_relaxed) == pad) return n;
+    return -1;
+}
+
+void PadRomplerProcessor::setPadNote (int pad, int note)
+{
+    if (! isPositiveAndBelow (pad, PadLayout::numPads)) return;
+    for (auto& m : noteToPad)                                  // a pad has one note...
+        if (m.load (std::memory_order_relaxed) == pad) m.store (-1, std::memory_order_relaxed);
+    if (isPositiveAndBelow (note, 128)) noteToPad[note].store (pad, std::memory_order_relaxed);   // ...and a note plays one pad
+}
+
+void PadRomplerProcessor::resetPadNotes()
+{
+    for (int n = 0; n < 128; ++n) noteToPad[n].store (defaultNoteToPad[n], std::memory_order_relaxed);
+}
+
+bool PadRomplerProcessor::padNotesAreDefault() const
+{
+    for (int n = 0; n < 128; ++n)
+        if (noteToPad[n].load (std::memory_order_relaxed) != defaultNoteToPad[n]) return false;
+    return true;
+}
 
 void PadRomplerProcessor::transportAction (int button, bool hostIsPlaying)
 {
